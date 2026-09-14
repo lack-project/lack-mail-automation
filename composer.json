@@ -1,37 +1,32 @@
 {
-  "name": "phore/project",
+  "name": "lack/mail-automation",
   "type": "library",
-  "description": "",
+  "description": "Stateful mailbox automation, contact resolution and rule processing on top of phore/mail-client.",
   "license": "MIT",
-  "authors": [
-    {
-      "name": "Matthias Leuffen",
-      "email": "leuffen@continue.de"
-    }
+  "repositories": [
+    {"type": "vcs", "url": "https://github.com/phore/phore-mailclient"}
   ],
-  "autoload": {
-    "psr-4": {
-      "Phore\\FileSystem\\": "src/"
-    },
-    "files": [
-      "src/functions.php"
-    ]
-  },
   "require": {
-    "php" : ">=8.3",
-    "ext-yaml": "*",
-    "ext-json": "*"
+    "php": ">=8.5",
+    "ext-json": "*",
+    "ext-pdo": "*",
+    "ext-pdo_sqlite": "*",
+    "phore/mail-client": "dev-feat/folder-sync"
   },
   "require-dev": {
-    "phpunit/phpunit": "^13.2.2"
+    "phpunit/phpunit": "^13.2"
   },
-  "suggest": {
+  "autoload": {
+    "classmap": ["src/"]
   },
-  "config": {
-    "preferred-install": "source",
-    "allow-plugins": {
-      "php-http/discovery": false
+  "autoload-dev": {
+    "psr-4": {
+      "Lack\\MailAutomation\\Test\\": "test/"
     }
   },
-  "minimum-stability": "dev"
+  "scripts": {
+    "test": "phpunit test"
+  },
+  "minimum-stability": "dev",
+  "prefer-stable": true
 }
