@@ -1,0 +1,5 @@
+[submodule ".agents/skills/phore-ai-skills"]
+	path = .agents/skills/phore-ai-skills
+	url = git@github.com:phore/phore-ai-skills.git
+	branch = main
+	pushurl = git@github.com:phore/phore-ai-skills.git

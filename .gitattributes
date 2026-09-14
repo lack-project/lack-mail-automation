@@ -1,0 +1,45 @@
+# Bei Merge-Konflikten von composer.lock die eigene Version behalten.
+# Hinweis: Git speichert die Implementierung des merge=ours-Treibers nicht in .gitattributes,
+# sondern benötigt zusätzlich einmalig: git config merge.ours.driver true
+composer.lock merge=ours
+
+# Binärdateien nicht als Text behandeln und keine Text-Merges versuchen.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.bmp binary
+*.ico binary
+*.pdf binary
+
+# Fonts
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.eot binary
+
+# Archive / sonstige Binärdaten
+*.zip binary
+*.tar binary
+*.tar.gz binary
+*.tgz binary
+*.gz binary
+*.bz2 binary
+*.xz binary
+*.7z binary
+*.rar binary
+
+# Office / Medien
+*.doc binary
+*.docx binary
+*.xls binary
+*.xlsx binary
+*.ppt binary
+*.pptx binary
+*.mp3 binary
+*.mp4 binary
+*.mov binary
+*.avi binary
+*.webm binary

@@ -1,0 +1,57 @@
+# JetBrains IDEs (IntelliJ, PhpStorm, WebStorm)
+/.idea/*
+!/.idea/.gitignore
+!/.idea/php.xml
+!/.idea/runConfigurations/
+!/.idea/runConfigurations/*.xml
+
+# VS Code
+/.vscode/*
+!/.vscode/extensions.json
+!/.vscode/settings.json.example
+!/.vscode/launch.json.example
+!/.vscode/tasks.json.example
+
+# Eclipse / generic IDE metadata
+/.project
+/.classpath
+/.settings/
+
+# NetBeans
+/nbproject/private/
+
+# Dependencies / generated files
+/vendor
+/node_modules
+/composer.lock
+
+# Temporary / backup files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+*.orig
+*.rej
+*.swp
+*.swo
+*.swn
+*.swap
+*~
+.~*
+
+# Editor swap/session files
+Session.vim
+.netrwhist
+*.kate-swp
+
+# OS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.Trashes/
+
