@@ -2,6 +2,7 @@
 use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailAutomation;
+use Lack\MailAutomation\MailContext;
 use Phore\MailClient\Email;
 
 // $client is one connected MailClient with From/Inbox/Sent folders configured.
@@ -15,15 +16,21 @@ $automation = new MailAutomation(
 
 $automation->onFolder(Folder::Inbox)->addAutomation(
     priority: 100,
-    matches: fn (Email $mail, $context): bool => $context->contactResolution->needsReview(),
-    handle: fn (Email $mail, $context): MailActions =>
-        MailActions::create()->addFlag('phore_review')->moveTo('Review'),
+    matches: fn (Email $mail, MailContext $context): bool => $context->contactResolution->needsReview(),
+    handle: function (Email $mail, MailContext $context): MailActions {
+        // Use the context logger for diagnostics instead of echo/print output.
+        // It already carries the current message and automation scope.
+        $context->logger->notice('Route message {} to review', [$mail->messageId() ?? $mail->id() ?? 'unknown']);
+        return MailActions::create()->addFlag('phore_review')->moveTo('Review');
+    },
 );
 
 $automation->onFolder(Folder::Inbox)->addAutomation(
-    matches: fn (Email $mail, $context): bool => true,
-    handle: fn (Email $mail, $context): MailActions =>
-        MailActions::create()->moveTo('Customers'),
+    matches: fn (Email $mail, MailContext $context): bool => true,
+    handle: function (Email $mail, MailContext $context): MailActions {
+        $context->logger->debug('Route message {} to Customers', [$mail->messageId() ?? $mail->id() ?? 'unknown']);
+        return MailActions::create()->moveTo('Customers');
+    },
 );
 
 $report = $automation->run();
