@@ -2,6 +2,7 @@
 declare(strict_types=1);
 namespace Lack\MailAutomation;
 
+use DateTimeImmutable;
 use Phore\Log\PhoreLogger;
 use Phore\MailClient\Email;
 use Phore\MailClient\MailClient;
@@ -74,6 +75,83 @@ final class MetadataBag
     { return new $class($this); }
 }
 
+final class TagBag
+{
+    public function __construct(
+        private AutomationStorage $storage,
+        private string $scope,
+        private string $scopeId,
+    ) {}
+
+    public function set(string $name, ?string $value = null): void
+    { $this->storage->tagSet($this->scope, $this->scopeId, $name, $value); }
+
+    public function has(string $name, ?string $value = null): bool
+    { return $this->storage->tagHas($this->scope, $this->scopeId, $name, $value); }
+
+    public function value(string $name): ?string
+    { return $this->storage->tagValue($this->scope, $this->scopeId, $name); }
+
+    public function remove(string $name): void
+    { $this->storage->tagRemove($this->scope, $this->scopeId, $name); }
+
+    public function all(): array
+    { return $this->storage->tagAll($this->scope, $this->scopeId); }
+}
+
+enum HistoryFilterResult
+{
+    case Match;
+    case NoMatch;
+    case Stop;
+}
+
+final class HistoryFilter
+{
+    private function __construct(private \Closure $evaluate) {}
+
+    public static function callback(callable $evaluate): self
+    { return new self(\Closure::fromCallable($evaluate)); }
+
+    public static function tag(string $name, ?string $value = null): self
+    {
+        return new self(static fn(MailHistoryEntry $entry): HistoryFilterResult =>
+            $entry->hasTag($name, $value) ? HistoryFilterResult::Match : HistoryFilterResult::NoMatch
+        );
+    }
+
+    public static function subjectContains(string $subject): self
+    {
+        if ($subject === '') { throw new \InvalidArgumentException('Subject filter must not be empty.'); }
+        return new self(static fn(MailHistoryEntry $entry): HistoryFilterResult =>
+            str_contains($entry->subject, $subject) ? HistoryFilterResult::Match : HistoryFilterResult::NoMatch
+        );
+    }
+
+    public static function from(DateTimeImmutable $from): self
+    {
+        return new self(static fn(MailHistoryEntry $entry): HistoryFilterResult =>
+            $entry->sortDate() < $from ? HistoryFilterResult::Stop : HistoryFilterResult::Match
+        );
+    }
+
+    public static function to(DateTimeImmutable $to): self
+    {
+        return new self(static fn(MailHistoryEntry $entry): HistoryFilterResult =>
+            $entry->sortDate() > $to ? HistoryFilterResult::NoMatch : HistoryFilterResult::Match
+        );
+    }
+
+    public function evaluate(MailHistoryEntry $entry): HistoryFilterResult
+    {
+        $result = ($this->evaluate)($entry);
+        if (!$result instanceof HistoryFilterResult) {
+            throw new \UnexpectedValueException('History filter callbacks must return HistoryFilterResult.');
+        }
+        return $result;
+    }
+}
+
 final readonly class ContactAlias
 {
     public function __construct(
@@ -83,6 +161,44 @@ final readonly class ContactAlias
     ) {}
 }
 
+final class MailHistoryEntry
+{
+    private TagBag $tagBag;
+
+    public function __construct(
+        public readonly int $id,
+        private AutomationStorage $storage,
+        public readonly ?string $messageId,
+        public readonly string $direction,
+        public readonly string $folder,
+        public readonly ?string $serverId,
+        public readonly string $subject,
+        public readonly ?DateTimeImmutable $date,
+        public readonly DateTimeImmutable $observedAt,
+        string $tagScopeId,
+    ) {
+        $this->tagBag = new TagBag($storage, 'message', $tagScopeId);
+    }
+
+    public function sortDate(): DateTimeImmutable
+    { return $this->date ?? $this->observedAt; }
+
+    public function setTag(string $name, ?string $value = null): void
+    { $this->tagBag->set($name, $value); }
+
+    public function hasTag(string $name, ?string $value = null): bool
+    { return $this->tagBag->has($name, $value); }
+
+    public function getTagValue(string $name): ?string
+    { return $this->tagBag->value($name); }
+
+    public function removeTag(string $name): void
+    { $this->tagBag->remove($name); }
+
+    public function tags(): array
+    { return $this->tagBag->all(); }
+}
+
 final class Contact
 {
     public string $name;
@@ -90,6 +206,7 @@ final class Contact
     /** @var list<ContactAlias> */
     public array $aliases;
     public readonly MetadataBag $metadata;
+    private TagBag $tagBag;
 
     public function __construct(
         public readonly string $id,
@@ -102,6 +219,7 @@ final class Contact
         $this->primaryEmail = $primaryEmail;
         $this->aliases = $aliases;
         $this->metadata = new MetadataBag($storage, 'contact', $id);
+        $this->tagBag = new TagBag($storage, 'contact', $id);
     }
 
     public function setName(string $name): void
@@ -123,6 +241,38 @@ final class Contact
     public function removeAlias(string $email): void
     { $this->storage->contactRemoveAlias($this->id, $email); $this->refresh(); }
 
+    public function setTag(string $name, ?string $value = null): void
+    { $this->tagBag->set($name, $value); }
+
+    public function hasTag(string $name, ?string $value = null): bool
+    { return $this->tagBag->has($name, $value); }
+
+    public function getTagValue(string $name): ?string
+    { return $this->tagBag->value($name); }
+
+    public function removeTag(string $name): void
+    { $this->tagBag->remove($name); }
+
+    public function tags(): array
+    { return $this->tagBag->all(); }
+
+    /** @return iterable<MailHistoryEntry> Newest matching messages first. */
+    public function mailHistory(int $limit = 0, HistoryFilter ...$filters): iterable
+    {
+        if ($limit < 0) { throw new \InvalidArgumentException('History limit must be zero or greater.'); }
+        $matched = 0;
+        foreach ($this->storage->historyForContact($this->id) as $entry) {
+            foreach ($filters as $filter) {
+                $result = $filter->evaluate($entry);
+                if ($result === HistoryFilterResult::Stop) { return; }
+                if ($result === HistoryFilterResult::NoMatch) { continue 2; }
+            }
+            yield $entry;
+            $matched++;
+            if ($limit > 0 && $matched >= $limit) { return; }
+        }
+    }
+
     private function refresh(): void
     {
         $fresh = $this->storage->contacts()->findById($this->id);
@@ -133,7 +283,7 @@ final class Contact
     }
 }
 
-final class Contacts
+final class Contacts implements \IteratorAggregate
 {
     public function __construct(private AutomationStorage $storage) {}
 
@@ -145,12 +295,18 @@ final class Contacts
 
     public function create(string $email, ?string $name = null, string $source = 'manual'): Contact
     { return $this->storage->contactCreate($email, $name, $source); }
+
+    public function all(): iterable
+    { return $this->storage->contactAll(); }
+
+    public function getIterator(): \Traversable
+    { yield from $this->storage->contactAll(); }
 }
 
 final class MailHistoryStore
 {
     public function __construct(private AutomationStorage $storage) {}
-    public function forContact(string $contactId): array
+    public function forContact(string $contactId): iterable
     { return $this->storage->historyForContact($contactId); }
 }
 
@@ -182,6 +338,7 @@ final class MailContext
     public readonly MailThread $thread;
     /** @var array<string,Contact|null> */
     public array $recipientContacts = [];
+    private TagBag $tagBag;
 
     public function __construct(
         public readonly Email $mail,
@@ -194,7 +351,9 @@ final class MailContext
         private AutomationStorage $storage,
         private MailClient $client,
     ) {
-        $this->metadata = new MetadataBag($storage, 'message', $mail->id() ?? $mail->messageId() ?? spl_object_hash($mail));
+        $scopeId = $mail->messageId() ?? $mail->id() ?? 'object:' . spl_object_id($mail);
+        $this->metadata = new MetadataBag($storage, 'message', $scopeId);
+        $this->tagBag = new TagBag($storage, 'message', $scopeId);
         $this->mailbox = new MailboxContext($client, $storage);
         $this->thread = new MailThread([$mail]);
         if ($direction === 'outgoing') {
@@ -207,6 +366,21 @@ final class MailContext
 
     public function hasFlag(string $flag): bool
     { return in_array($flag, $this->mail->flags(), true); }
+
+    public function setTag(string $name, ?string $value = null): void
+    { $this->tagBag->set($name, $value); }
+
+    public function hasTag(string $name, ?string $value = null): bool
+    { return $this->tagBag->has($name, $value); }
+
+    public function getTagValue(string $name): ?string
+    { return $this->tagBag->value($name); }
+
+    public function removeTag(string $name): void
+    { $this->tagBag->remove($name); }
+
+    public function tags(): array
+    { return $this->tagBag->all(); }
 
     public function createContactForRecipient(?string $email = null): Contact
     {
