@@ -21,11 +21,12 @@ final class StoragePathTest extends TestCase
             unset($database);
 
             $client = new MailClient(new TestSyncTransport(), 'path-storage-account', from: 'me@example.org');
-            $automation = new MailAutomation(client: $client, storage: $path);
+            new MailAutomation(client: $client, storage: $path);
 
-            self::assertSame('keep-me', (new PDO('sqlite:' . $path))->query('SELECT value FROM application_data')->fetchColumn());
+            $check = new PDO('sqlite:' . $path);
+            self::assertSame('keep-me', $check->query('SELECT value FROM application_data')->fetchColumn());
 
-            $tables = (new PDO('sqlite:' . $path))
+            $tables = $check
                 ->query("SELECT name FROM sqlite_master WHERE type = 'table'")
                 ->fetchAll(PDO::FETCH_COLUMN);
 
@@ -33,7 +34,10 @@ final class StoragePathTest extends TestCase
             self::assertContains('automation_state', $tables);
             self::assertContains('contacts', $tables);
             self::assertContains('metadata', $tables);
-            self::assertSame('path-storage-account', $automation->storage()->metadataGet('mailbox', 'test', 'missing', 'path-storage-account'));
+            self::assertSame(
+                'path-storage-account',
+                $check->query("SELECT v FROM automation_state WHERE k = 'account'")->fetchColumn(),
+            );
         } finally {
             @unlink($path);
         }
