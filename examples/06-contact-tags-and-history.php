@@ -1,45 +1,49 @@
 <?php
+use Lack\MailAutomation\Attributes\OnFolderAutomation;
 use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\HistoryFilter;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailContext;
 use Phore\MailClient\Email;
 
-// This example extends the configured $automation from the overview example.
-$automation->onFolder(Folder::Inbox)->addAutomation(
-    matches: static fn(Email $mail, MailContext $context): bool => $context->contact !== null,
-    handle: static function (Email $mail, MailContext $context): MailActions {
-        $contact = $context->contact;
+#[OnFolderAutomation(folder: Folder::Inbox)]
+function handleCustomerHistory(Email $mail, MailContext $context): MailActions
+{
+    if ($context->contact === null) {
+        return MailActions::pass();
+    }
 
-        $contact->setTag('customer');
-        $contact->setTag('customer_group', 'a');
+    $contact = $context->contact;
 
-        if ($contact->hasTag('customer_group', 'a')) {
-            $group = $contact->getTagValue('customer_group');
-            $context->logger->debug('Resolved customer group {}', [$group]);
-        }
+    $contact->setTag('customer');
+    $contact->setTag('customer_group', 'a');
 
-        // Message tags are independent from contact tags. They persist immediately and become
-        // visible on the history entry that is recorded after this message finishes processing.
-        $context->setTag('newsletter', '2026-09');
-        $context->setTag('temporary');
-        $context->removeTag('temporary');
+    if ($contact->hasTag('customer_group', 'a')) {
+        $group = $contact->getTagValue('customer_group');
+        $context->logger->debug('Resolved customer group {}', [$group]);
+    }
 
-        // History is streamed newest-first. Inside a handler this contains previous messages;
-        // the current message is appended to history after the handler completes successfully.
-        $previousNewsletter = null;
-        foreach ($contact->mailHistory(1, HistoryFilter::tag('newsletter')) as $entry) {
-            $previousNewsletter = $entry;
-        }
+    // Message tags are independent from contact tags. They persist immediately and become
+    // visible on the history entry that is recorded after this message finishes processing.
+    $context->setTag('newsletter', '2026-09');
+    $context->setTag('temporary');
+    $context->removeTag('temporary');
 
-        if ($previousNewsletter !== null) {
-            $context->logger->debug('Previous newsletter was {}', [$previousNewsletter->sortDate()->format(DATE_ATOM)]);
-        }
+    // History is streamed newest-first. Inside a handler this contains previous messages;
+    // the current message is appended to history after the handler completes successfully.
+    $previousNewsletter = null;
+    foreach ($contact->mailHistory(1, HistoryFilter::tag('newsletter')) as $entry) {
+        $previousNewsletter = $entry;
+    }
 
-        return MailActions::complete();
-    },
-);
+    if ($previousNewsletter !== null) {
+        $context->logger->debug('Previous newsletter was {}', [$previousNewsletter->sortDate()->format(DATE_ATOM)]);
+    }
 
+    return MailActions::complete();
+}
+
+$automation->addRules('handleCustomerHistory');
 $automation->run();
 
 // Contacts are iterable for maintenance/reporting jobs outside an individual message handler.
