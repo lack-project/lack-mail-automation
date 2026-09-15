@@ -4,7 +4,7 @@ Stateful mail automation for PHP 8.5 on top of `phore/mail-client`. This package
 
 ## Boundary
 
-`phore/mail-client` supplies mailbox primitives: folder synchronization, configured standard folders, account/sender identity, side-effect-free reads, flags, drafts and verified same-account moves. `lack/mail-automation` consumes those APIs and adds SQLite-backed cursors, Sent evidence, contacts and aliases, metadata, rule execution and the `phore_processed` processing gate. No IMAP transport implementation is duplicated here.
+`phore/mail-client` supplies mailbox primitives: folder synchronization, configured standard folders, account/sender identity, side-effect-free reads, flags, drafts and verified same-account moves. `lack/mail-automation` consumes those APIs and adds SQLite-backed cursors, Sent evidence, contacts and aliases, metadata, tags, rule execution and the `phore_processed` processing gate. No IMAP transport implementation is duplicated here.
 
 During development this package depends on `phore/mail-client:dev-feat/folder-sync`; after the corresponding MailClient PR is merged, switch the constraint to the released version containing these primitives.
 
@@ -29,7 +29,7 @@ $automation->onFolder(Folder::Inbox)->addAutomation(
 $report = $automation->run();
 ```
 
-The same SQLite database must be reused across runs. Tables for cursors, contacts, aliases, metadata, Sent evidence and history are initialized automatically. State is bound to one MailClient account ID; reusing it with another account fails.
+The same SQLite database must be reused across runs. Tables for cursors, contacts, aliases, metadata, tags, Sent evidence and history are initialized automatically. State is bound to one MailClient account ID; reusing it with another account fails.
 
 ## Processing model
 
@@ -60,7 +60,44 @@ The six outcomes are:
 | `Conflict` | Evidence contradicts an existing contact assignment; nothing is merged. |
 | `OutgoingMissing` | Referenced Sent evidence is no longer present for live verification. |
 
-`ContactResolution::needsReview()` is true for `Conflict` and `OutgoingMissing`. Contact mutations (`setName`, `addAlias`, `setAliasName`, `setPrimaryEmail`, `removeAlias`) persist immediately. An address can belong to only one contact, and the primary address cannot be removed.
+`ContactResolution::needsReview()` is true for `Conflict` and `OutgoingMissing`. Contact mutations (`setName`, `addAlias`, `setAliasName`, `setPrimaryEmail`, `removeAlias`) persist immediately. An address can belong to only one contact, and the primary address cannot be removed. `Contacts` is iterable, so maintenance and reporting code can loop over all known contacts directly.
+
+## Tags
+
+Contacts, the currently processed message and stored mail-history entries expose the same tag operations:
+
+```php
+$contact->setTag('customer');
+$contact->setTag('customer_group', 'a');
+$contact->hasTag('customer_group', 'a');
+$contact->getTagValue('customer_group');
+$contact->removeTag('customer_group');
+$contact->tags();
+```
+
+The value is optional. One tag name exists at most once per tagged object; calling `setTag()` again replaces its previous value. `hasTag($name)` checks only existence, while `hasTag($name, $value)` also requires that value. `getTagValue()` returns `null` both for a valueless tag and an absent tag, so use `hasTag()` when the distinction matters.
+
+Inside an automation, `MailContext` offers `setTag()`, `hasTag()`, `getTagValue()`, `removeTag()` and `tags()` for the current message. Message tags are independent from contact tags and persist immediately.
+
+## Mail history
+
+`Contact::mailHistory(int $limit = 0, HistoryFilter ...$filters)` streams matching history entries lazily. `limit=0` means unlimited; a positive limit counts matched entries. Mail history is a public ordering contract: it is always returned in descending chronological order, newest mail first. Filters never change that order.
+
+Built-in filters include `HistoryFilter::tag()`, `HistoryFilter::subjectContains()`, `HistoryFilter::from()` and `HistoryFilter::to()`. Multiple filters use AND semantics. `HistoryFilter::callback()` supports application-specific decisions and must return `HistoryFilterResult::Match`, `NoMatch` or `Stop`. `Stop` terminates the generator immediately, so the SQLite cursor is not drained further. The built-in `from()` filter uses this because once newest-first history reaches an entry older than the lower bound, all later rows are older as well.
+
+```php
+foreach (
+    $contact->mailHistory(
+        10,
+        HistoryFilter::tag('newsletter'),
+        HistoryFilter::from(new DateTimeImmutable('2026-01-01')),
+    ) as $entry
+) {
+    // Newest matching newsletter first.
+}
+```
+
+During an incoming handler, `Contact::mailHistory()` contains the previously recorded history. The current message is recorded after its handler finishes; tags set through `MailContext` are then visible on that new history entry.
 
 ## Metadata scopes
 
@@ -82,6 +119,8 @@ Read in order:
 2. `examples/02-contact-resolution.php` — handle all contact-resolution outcomes.
 3. `examples/03-contact-management.php` — deliberate contact and alias maintenance.
 4. `examples/04-attributes-and-metadata.php` — attributes and typed application metadata.
+5. `examples/05-storage-connectors.md` — storage connector notes.
+6. `examples/06-contact-tags-and-history.php` — contact/message tags, lazy filtered history and contact iteration.
 
 ## Limits
 
