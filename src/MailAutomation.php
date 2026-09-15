@@ -53,10 +53,14 @@ final class MailAutomation
 
     public function __construct(
         private MailClient $client,
-        PDO|AutomationStorage $storage,
+        PDO|AutomationStorage|string $storage,
         ?ContactResolver $contactResolver = null,
         private ?DraftSender $sender = null,
     ) {
+        if (is_string($storage)) {
+            if ($storage === '') { throw new \InvalidArgumentException('SQLite storage path must not be empty.'); }
+            $storage = new PDO('sqlite:' . $storage);
+        }
         $this->storage = $storage instanceof PDO ? new SqliteStorage($storage) : $storage;
         $this->storage->bindAccount($client->accountId());
         if ($client->fromAddress() === null) { throw new \InvalidArgumentException('Mail automation requires a configured From address.'); }
