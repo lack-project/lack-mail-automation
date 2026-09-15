@@ -2,6 +2,7 @@
 declare(strict_types=1);
 namespace Lack\MailAutomation;
 
+use Phore\Log\PhoreLogger;
 use Phore\MailClient\Email;
 use Phore\MailClient\MailClient;
 
@@ -188,6 +189,7 @@ final class MailContext
         public readonly string $direction,
         public readonly ?Contact $contact,
         public readonly ContactResolution $contactResolution,
+        public PhoreLogger $logger,
         private AutomationStorage $storage,
         private MailClient $client,
     ) {
