@@ -169,7 +169,7 @@ final class MailAutomation
         return 'closure-' . ($this->order + 1);
     }
 
-    public function run(bool $processExistingOutgoing = false): RunReport
+    public function run(bool $processExistingOutgoing = false, bool $dryRun = false): RunReport
     {
         $report = new RunReport();
         $this->deferred = [];
@@ -181,13 +181,13 @@ final class MailAutomation
             if (!in_array($folder, $folders, true)) { $folders[] = $folder; }
         }
         foreach ($folders as $folder) {
-            $this->drainFolder($folder, $folder === $sent, $processExistingOutgoing, $report);
+            $this->drainFolder($folder, $folder === $sent, $processExistingOutgoing, $dryRun, $report);
         }
         $this->logger->debug('Run finished: {} processed, {} skipped, {} indexed sent', [$report->processed, $report->skipped, $report->indexedSent]);
         return $report;
     }
 
-    private function drainFolder(string $folder, bool $isSent, bool $processExistingOutgoing, RunReport $report): void
+    private function drainFolder(string $folder, bool $isSent, bool $processExistingOutgoing, bool $dryRun, RunReport $report): void
     {
         $log = $this->logger->scope('sync')->withContext(['folder' => $folder]);
         $cursor = $this->storage->cursor($folder);
@@ -220,19 +220,21 @@ final class MailAutomation
                 }
                 if ($isSent) { $this->indexSent($mail, $folder, $report); }
                 if ($baselineSent && !in_array(self::PROCESSED_FLAG, $mail->flags(), true)) {
-                    try {
-                        $this->client->addFlag($mail, self::PROCESSED_FLAG);
-                        $report->skipped++;
-                        $log->debug('Baseline sent message marked processed without automation');
-                    } catch (\Throwable $error) {
-                        $log->error('Marking baseline sent message failed: {}', [$error->getMessage(), 'exception' => $error]);
-                        $report->addError($folder,$mail->messageId(),$error);
-                        return;
+                    if (!$dryRun) {
+                        try {
+                            $this->client->addFlag($mail, self::PROCESSED_FLAG);
+                            $log->debug('Baseline sent message marked processed without automation');
+                        } catch (\Throwable $error) {
+                            $log->error('Marking baseline sent message failed: {}', [$error->getMessage(), 'exception' => $error]);
+                            $report->addError($folder,$mail->messageId(),$error);
+                            return;
+                        }
                     }
+                    $report->skipped++;
                     continue;
                 }
                 try {
-                    $this->processMessage($mail, $folder, $isSent ? 'outgoing' : 'incoming', $report);
+                    $this->processMessage($mail, $folder, $isSent ? 'outgoing' : 'incoming', $dryRun, $report);
                 } catch (\Throwable $error) {
                     $log->error('Message processing failed: {}', [$error->getMessage(), 'exception' => $error]);
                     $report->addError($folder, $mail->messageId(), $error);
@@ -240,9 +242,11 @@ final class MailAutomation
                 }
             }
 
-            $this->storage->saveCursor($folder, $changes->nextCursor);
+            if (!$dryRun) {
+                $this->storage->saveCursor($folder, $changes->nextCursor);
+                $log->debug('Saved folder cursor {}', [$changes->nextCursor]);
+            }
             $cursor = $changes->nextCursor;
-            $log->debug('Saved folder cursor {}', [$cursor]);
         } while ($changes->hasMore);
     }
 
@@ -260,7 +264,7 @@ final class MailAutomation
         }
     }
 
-    private function processMessage(Email $mail, string $folder, string $direction, RunReport $report): void
+    private function processMessage(Email $mail, string $folder, string $direction, bool $dryRun, RunReport $report): void
     {
         $messageId = $mail->messageId() ?? $mail->id() ?? 'unknown';
         $messageLog = $this->logger->scope('message')->withContext(['messageId' => $messageId, 'folder' => $folder, 'direction' => $direction]);
@@ -284,7 +288,7 @@ final class MailAutomation
         }
         $messageLog->debug('Contact resolution status {}', [$resolution->status->value]);
 
-        $context = new MailContext($mail,$folder,$direction,$resolution->contact,$resolution,$messageLog,$this->storage,$this->client);
+        $context = new MailContext($mail,$folder,$direction,$resolution->contact,$resolution,$messageLog,$dryRun,$this->storage,$this->client);
         $rules = $this->rulesFor($folder);
         $final = $mail;
         $handled = false;
@@ -319,7 +323,7 @@ final class MailAutomation
             break;
         }
 
-        if (!$reprocess) { $final = $this->client->addFlag($final, self::PROCESSED_FLAG); }
+        if (!$dryRun && !$reprocess) { $final = $this->client->addFlag($final, self::PROCESSED_FLAG); }
         if ($reprocess && $final->messageId() !== null) { $this->deferred[$final->messageId()] = true; }
         $this->storage->recordHistory($resolution->contact?->id,$final,$direction,$folder);
         $report->processed++;

@@ -52,6 +52,34 @@ final class MailAutomationTest extends TestCase
         self::assertSame(1, $calls);
     }
 
+    public function testDryRunIsVisibleInContextAndCanBeRepeatedWithoutCheckpoint(): void
+    {
+        [$automation, $transport] = $this->fixture();
+        $transport->addMessage('INBOX', 1, $this->headers(
+            from: 'customer@example.org',
+            to: 'me@example.org',
+            messageId: 'dry-run@example.org',
+        ));
+
+        $calls = 0;
+        $automation->register(
+            Folder::Inbox,
+            static fn(Email $mail, MailContext $context): bool => true,
+            static function (Email $mail, MailContext $context) use (&$calls): MailActions {
+                self::assertTrue($context->dryRun);
+                $calls++;
+                return MailActions::complete();
+            },
+            automationId: 'dry-run',
+        );
+
+        self::assertSame(1, $automation->run(dryRun: true)->processed);
+        self::assertSame(1, $automation->run(dryRun: true)->processed);
+        self::assertSame(2, $calls);
+        self::assertNotContains(MailAutomation::PROCESSED_FLAG, $transport->messages['INBOX'][1]);
+        self::assertNull($automation->storage()->cursor('INBOX'));
+    }
+
     public function testVerifiedReplyCreatesContactAndAliasFromSentEvidence(): void
     {
         [$automation, $transport] = $this->fixture();

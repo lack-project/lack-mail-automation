@@ -190,6 +190,7 @@ final class MailContext
         public readonly ?Contact $contact,
         public readonly ContactResolution $contactResolution,
         public PhoreLogger $logger,
+        public readonly bool $dryRun,
         private AutomationStorage $storage,
         private MailClient $client,
     ) {
