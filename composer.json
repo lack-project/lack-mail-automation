@@ -11,6 +11,7 @@
     "ext-json": "*",
     "ext-pdo": "*",
     "ext-pdo_sqlite": "*",
+    "phore/log": "^3.0.0",
     "phore/mail-client": "dev-main"
   },
   "require-dev": {

@@ -4,6 +4,7 @@ namespace Lack\MailAutomation;
 
 use Lack\MailAutomation\Attributes\OnFolderAutomation;
 use PDO;
+use Phore\Log\PhoreLogger;
 use Phore\MailClient\Email;
 use Phore\MailClient\MailClient;
 
@@ -43,6 +44,7 @@ final class MailAutomation
 
     private AutomationStorage $storage;
     private ContactResolver $resolver;
+    private PhoreLogger $logger;
     /** @var list<Rule> */
     private array $rules = [];
     /** @var array<string,true> */
@@ -56,7 +58,9 @@ final class MailAutomation
         PDO|AutomationStorage|string $storage,
         ?ContactResolver $contactResolver = null,
         private ?DraftSender $sender = null,
+        ?PhoreLogger $logger = null,
     ) {
+        $this->logger = ($logger ?? PhoreLogger::GetInstance())->scope('mailAutomation');
         if (is_string($storage)) {
             if ($storage === '') { throw new \InvalidArgumentException('SQLite storage path must not be empty.'); }
             $storage = new PDO('sqlite:' . $storage);
@@ -66,9 +70,11 @@ final class MailAutomation
         if ($client->fromAddress() === null) { throw new \InvalidArgumentException('Mail automation requires a configured From address.'); }
         $this->resolver = $contactResolver ?? new ReplyContactResolver();
         $this->resolver->bind($client, $this->storage);
+        $this->logger->debug('Initialized mail automation for account {}', [$client->accountId()]);
     }
 
     public function storage(): AutomationStorage { return $this->storage; }
+    public function logger(): PhoreLogger { return $this->logger; }
     public function onFolder(Folder|string $folder): FolderRegistration { return new FolderRegistration($this, $folder); }
 
     public function register(
@@ -93,6 +99,7 @@ final class MailAutomation
             $flag,
             $this->order++,
         );
+        $this->logger->debug('Registered automation {} for folder {}', [$id, $folder instanceof Folder ? $folder->value : $folder]);
     }
 
     public function addRules(object|callable|string $rules): self
@@ -166,6 +173,7 @@ final class MailAutomation
     {
         $report = new RunReport();
         $this->deferred = [];
+        $this->logger->debug('Start run with {} registered automations', [count($this->rules)]);
         $sent = Folder::Sent->resolve($this->client);
         $folders = [$sent];
         foreach ($this->rules as $rule) {
@@ -175,17 +183,22 @@ final class MailAutomation
         foreach ($folders as $folder) {
             $this->drainFolder($folder, $folder === $sent, $processExistingOutgoing, $report);
         }
+        $this->logger->debug('Run finished: {} processed, {} skipped, {} indexed sent', [$report->processed, $report->skipped, $report->indexedSent]);
         return $report;
     }
 
     private function drainFolder(string $folder, bool $isSent, bool $processExistingOutgoing, RunReport $report): void
     {
+        $log = $this->logger->scope('sync')->withContext(['folder' => $folder]);
         $cursor = $this->storage->cursor($folder);
         $baselineSent = $isSent && $cursor === null && !$processExistingOutgoing;
+        $log->debug('Start folder sync with cursor {}', [$cursor]);
         do {
             try {
                 $changes = $this->client->syncFolder($folder, $cursor, 100);
+                $log->debug('Fetched {} added messages and {} flag changes', [count($changes->added), count($changes->flagsChanged)]);
             } catch (\Throwable $error) {
+                $log->error('Folder sync failed: {}', [$error->getMessage(), 'exception' => $error]);
                 $report->addError($folder, null, $error);
                 return;
             }
@@ -193,23 +206,35 @@ final class MailAutomation
             $messages = $changes->added;
             foreach ($changes->flagsChanged as $change) {
                 try { $messages[] = $this->client->peek($change->id); }
-                catch (\Throwable $error) { $report->addError($folder, null, $error); return; }
+                catch (\Throwable $error) {
+                    $log->error('Loading changed message failed: {}', [$error->getMessage(), 'exception' => $error]);
+                    $report->addError($folder, null, $error);
+                    return;
+                }
             }
 
             foreach ($messages as $mail) {
                 if ($mail->messageId() !== null && isset($this->deferred[$mail->messageId()])) {
-                    // Do not advance this folder cursor; the destination must be observed next run.
+                    $log->debug('Stop folder sync for deferred message {}', [$mail->messageId()]);
                     return;
                 }
                 if ($isSent) { $this->indexSent($mail, $folder, $report); }
                 if ($baselineSent && !in_array(self::PROCESSED_FLAG, $mail->flags(), true)) {
-                    try { $this->client->addFlag($mail, self::PROCESSED_FLAG); $report->skipped++; }
-                    catch (\Throwable $error) { $report->addError($folder,$mail->messageId(),$error); return; }
+                    try {
+                        $this->client->addFlag($mail, self::PROCESSED_FLAG);
+                        $report->skipped++;
+                        $log->debug('Baseline sent message marked processed without automation');
+                    } catch (\Throwable $error) {
+                        $log->error('Marking baseline sent message failed: {}', [$error->getMessage(), 'exception' => $error]);
+                        $report->addError($folder,$mail->messageId(),$error);
+                        return;
+                    }
                     continue;
                 }
                 try {
                     $this->processMessage($mail, $folder, $isSent ? 'outgoing' : 'incoming', $report);
                 } catch (\Throwable $error) {
+                    $log->error('Message processing failed: {}', [$error->getMessage(), 'exception' => $error]);
                     $report->addError($folder, $mail->messageId(), $error);
                     return;
                 }
@@ -217,6 +242,7 @@ final class MailAutomation
 
             $this->storage->saveCursor($folder, $changes->nextCursor);
             $cursor = $changes->nextCursor;
+            $log->debug('Saved folder cursor {}', [$cursor]);
         } while ($changes->hasMore);
     }
 
@@ -230,13 +256,21 @@ final class MailAutomation
         if (count($recipients) === 1 && count($mail->from()) === 1 && $mail->from()[0]->getAddress() === $own) {
             $this->storage->recordSent($mail, $folder, array_key_first($recipients));
             $report->indexedSent++;
+            $this->logger->scope('sent')->debug('Indexed sent message {}', [$mail->messageId() ?? $mail->id() ?? 'unknown']);
         }
     }
 
     private function processMessage(Email $mail, string $folder, string $direction, RunReport $report): void
     {
-        if (in_array(self::PROCESSED_FLAG, $mail->flags(), true)) { $report->skipped++; return; }
+        $messageId = $mail->messageId() ?? $mail->id() ?? 'unknown';
+        $messageLog = $this->logger->scope('message')->withContext(['messageId' => $messageId, 'folder' => $folder, 'direction' => $direction]);
+        if (in_array(self::PROCESSED_FLAG, $mail->flags(), true)) {
+            $report->skipped++;
+            $messageLog->debug('Skip already processed message');
+            return;
+        }
 
+        $messageLog->debug('Process message');
         if ($direction === 'incoming') {
             $resolution = $this->resolver->resolve($mail);
         } else {
@@ -248,23 +282,39 @@ final class MailAutomation
             $contact = count($contacts) === 1 ? $contacts[0] : null;
             $resolution = new ContactResolution($contact === null ? ContactResolutionStatus::Unknown : ContactResolutionStatus::KnownAddress, $contact);
         }
+        $messageLog->debug('Contact resolution status {}', [$resolution->status->value]);
 
-        $context = new MailContext($mail,$folder,$direction,$resolution->contact,$resolution,$this->storage,$this->client);
+        $context = new MailContext($mail,$folder,$direction,$resolution->contact,$resolution,$messageLog,$this->storage,$this->client);
         $rules = $this->rulesFor($folder);
         $final = $mail;
         $handled = false;
         $reprocess = false;
 
         foreach ($rules as $rule) {
-            if (!$rule->active) { continue; }
-            if ($rule->flag !== null && !$context->hasFlag($rule->flag)) { continue; }
-            if (!(($rule->matches)($mail,$context))) { continue; }
+            $context->logger = $messageLog->scope('automation')->withContext(['automationId' => $rule->id]);
+            if (!$rule->active) {
+                $context->logger->debug('Skip inactive automation {}', [$rule->id]);
+                continue;
+            }
+            if ($rule->flag !== null && !$context->hasFlag($rule->flag)) {
+                $context->logger->debug('Skip automation {} because flag {} is missing', [$rule->id, $rule->flag]);
+                continue;
+            }
+            $context->logger->debug('Evaluate automation {}', [$rule->id]);
+            if (!(($rule->matches)($mail,$context))) {
+                $context->logger->debug('Automation {} did not match', [$rule->id]);
+                continue;
+            }
             $actions = ($rule->handle)($mail,$context);
             if (!$actions instanceof MailActions) { throw new \UnexpectedValueException('Automation handlers must return MailActions.'); }
-            if ($actions->isPass()) { continue; }
+            if ($actions->isPass()) {
+                $context->logger->debug('Automation {} returned pass', [$rule->id]);
+                continue;
+            }
             $handled = true;
+            $context->logger->debug('Automation {} matched', [$rule->id]);
             if (!$actions->isComplete()) {
-                [$final,$reprocess] = $this->executeActions($final,$actions);
+                [$final,$reprocess] = $this->executeActions($final,$actions,$context->logger->scope('actions'));
             }
             break;
         }
@@ -273,13 +323,15 @@ final class MailAutomation
         if ($reprocess && $final->messageId() !== null) { $this->deferred[$final->messageId()] = true; }
         $this->storage->recordHistory($resolution->contact?->id,$final,$direction,$folder);
         $report->processed++;
+        $messageLog->debug('Finished message processing: handled={}, reprocess={}', [$handled, $reprocess]);
     }
 
-    private function executeActions(Email $mail, MailActions $actions): array
+    private function executeActions(Email $mail, MailActions $actions, PhoreLogger $logger): array
     {
         $current = $mail;
         $reprocess = false;
         foreach ($actions->items() as $item) {
+            $logger->debug('Execute action {}', [$item['type']]);
             switch ($item['type']) {
                 case 'addFlag':
                     $current = $this->client->addFlag($current,$item['args'][0]);

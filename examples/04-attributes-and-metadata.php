@@ -19,15 +19,17 @@ final class CustomerRules
     public function route(Email $mail, MailContext $context): MailActions
     {
         if ($context->contact === null) {
+            $context->logger->debug('Pass message without resolved contact');
             return MailActions::pass();
         }
 
         $customer = $context->contact->metadata->typed(CustomerMetadata::class);
         $customer->markReviewed();
 
-        return $customer->isB2b()
-            ? MailActions::create()->moveTo('B2B')
-            : MailActions::create()->moveTo('Customers');
+        $target = $customer->isB2b() ? 'B2B' : 'Customers';
+        $context->logger->scope('customer')->info('Route contact {} to {}', [$context->contact->id, $target]);
+
+        return MailActions::create()->moveTo($target);
     }
 }
 
@@ -35,3 +37,4 @@ $automation->addRules(new CustomerRules());
 $report = $automation->run();
 
 // Contact metadata persists immediately. It affects routing only because this rule reads it.
+// Handler diagnostics use MailContext::$logger, so they inherit the current message/automation context.
