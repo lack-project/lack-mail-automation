@@ -25,21 +25,18 @@ The built-in SQLite storage keeps these durable concerns:
 
 ## Custom connector
 
-A custom backend implements the public `AutomationStorage` contract. The automation engine does not require SQLite when that interface is supplied.
+A custom backend implements the public `AutomationStorage` contract. The automation engine does not require SQLite when that interface is supplied. An application may also derive its own named interface from the package contract and let its connector implementation target that interface:
 
 ```php
 use Lack\MailAutomation\AutomationStorage;
 use Lack\MailAutomation\MailAutomation;
 
-final class MyStorage implements AutomationStorage
+interface MyProjectMailStorage extends AutomationStorage
 {
-    // Implement the methods declared by AutomationStorage.
-    // Store cursors durably, enforce the account binding, and persist
-    // contacts, metadata, sent evidence and history with equivalent semantics.
 }
 
-/** @var AutomationStorage $storage */
-$storage = $container->get(MyStorage::class);
+/** @var MyProjectMailStorage $storage */
+$storage = $container->get(MyProjectMailStorage::class);
 
 $automation = new MailAutomation(
     client: $client,
@@ -47,4 +44,4 @@ $automation = new MailAutomation(
 );
 ```
 
-The connector owns persistence only. Mailbox synchronization, rule execution and processing semantics remain in `MailAutomation`; a connector should not duplicate IMAP behavior.
+The concrete connector must implement every method declared by `AutomationStorage` with equivalent persistence semantics: durable cursors, account binding, contacts and aliases, metadata, sent evidence and history. The connector owns persistence only. Mailbox synchronization, rule execution and processing semantics remain in `MailAutomation`; a connector should not duplicate IMAP behavior.
