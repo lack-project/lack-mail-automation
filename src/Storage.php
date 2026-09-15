@@ -2,6 +2,7 @@
 declare(strict_types=1);
 namespace Lack\MailAutomation;
 
+use DateTimeImmutable;
 use PDO;
 use Phore\MailClient\Email;
 
@@ -14,6 +15,7 @@ interface AutomationStorage
     public function contactFindByEmail(string $email): ?Contact;
     public function contactFindById(string $id): ?Contact;
     public function contactCreate(string $email, ?string $name = null, string $source = 'manual'): Contact;
+    public function contactAll(): iterable;
     public function contactSetName(string $id, string $name): void;
     public function contactAddAlias(string $id, string $email, ?string $name, string $source): ContactAlias;
     public function contactSetAliasName(string $id, string $email, ?string $name): void;
@@ -22,10 +24,16 @@ interface AutomationStorage
     public function metadataGet(string $scope, string $scopeId, string $key, mixed $default = null): mixed;
     public function metadataSet(string $scope, string $scopeId, string $key, mixed $value): void;
     public function metadataAll(string $scope, string $scopeId): array;
+    public function tagSet(string $scope, string $scopeId, string $name, ?string $value = null): void;
+    public function tagHas(string $scope, string $scopeId, string $name, ?string $value = null): bool;
+    public function tagValue(string $scope, string $scopeId, string $name): ?string;
+    public function tagRemove(string $scope, string $scopeId, string $name): void;
+    public function tagAll(string $scope, string $scopeId): array;
     public function recordSent(Email $mail, string $folder, string $recipientEmail): void;
     public function sentEvidence(string $messageId): ?MatchedOutgoing;
     public function recordHistory(?string $contactId, Email $mail, string $direction, string $folder): void;
-    public function historyForContact(string $contactId): array;
+    /** @return iterable<MailHistoryEntry> Newest messages first. */
+    public function historyForContact(string $contactId): iterable;
 }
 
 final class SqliteStorage implements AutomationStorage
@@ -50,9 +58,24 @@ final class SqliteStorage implements AutomationStorage
             'CREATE TABLE IF NOT EXISTS contact_aliases (email TEXT PRIMARY KEY, contact_id TEXT NOT NULL, name TEXT NULL, source TEXT NOT NULL, FOREIGN KEY(contact_id) REFERENCES contacts(id))',
             'CREATE INDEX IF NOT EXISTS idx_contact_aliases_contact ON contact_aliases(contact_id)',
             'CREATE TABLE IF NOT EXISTS metadata (scope TEXT NOT NULL, scope_id TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY(scope, scope_id, k))',
+            'CREATE TABLE IF NOT EXISTS tags (scope TEXT NOT NULL, scope_id TEXT NOT NULL, name TEXT NOT NULL, value TEXT NULL, PRIMARY KEY(scope, scope_id, name))',
+            'CREATE INDEX IF NOT EXISTS idx_tags_lookup ON tags(scope, name, value, scope_id)',
             'CREATE TABLE IF NOT EXISTS sent_evidence (message_id TEXT PRIMARY KEY, recipient_email TEXT NOT NULL, folder TEXT NOT NULL, server_id TEXT NOT NULL, sent_at TEXT NULL)',
-            'CREATE TABLE IF NOT EXISTS mail_history (id INTEGER PRIMARY KEY AUTOINCREMENT, contact_id TEXT NULL, message_id TEXT NULL, direction TEXT NOT NULL, folder TEXT NOT NULL, server_id TEXT NULL, observed_at TEXT NOT NULL)',
+            'CREATE TABLE IF NOT EXISTS mail_history (id INTEGER PRIMARY KEY AUTOINCREMENT, contact_id TEXT NULL, message_id TEXT NULL, direction TEXT NOT NULL, folder TEXT NOT NULL, server_id TEXT NULL, subject TEXT NOT NULL DEFAULT \'\', mail_date TEXT NULL, tag_scope_id TEXT NULL, observed_at TEXT NOT NULL)',
         ] as $sql) { $this->pdo->exec($sql); }
+
+        $this->ensureColumn('mail_history', 'subject', "TEXT NOT NULL DEFAULT ''");
+        $this->ensureColumn('mail_history', 'mail_date', 'TEXT NULL');
+        $this->ensureColumn('mail_history', 'tag_scope_id', 'TEXT NULL');
+    }
+
+    private function ensureColumn(string $table, string $column, string $definition): void
+    {
+        $columns = $this->pdo->query('PRAGMA table_info(' . $table . ')')->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($columns as $known) {
+            if ($known['name'] === $column) { return; }
+        }
+        $this->pdo->exec('ALTER TABLE ' . $table . ' ADD COLUMN ' . $column . ' ' . $definition);
     }
 
     public function bindAccount(string $accountId): void
@@ -85,6 +108,16 @@ final class SqliteStorage implements AutomationStorage
         return $email;
     }
 
+    private function normalizeTagName(string $name): string
+    {
+        $name = trim($name);
+        if ($name === '') { throw new \InvalidArgumentException('Tag name must not be empty.'); }
+        return $name;
+    }
+
+    private function messageTagScopeId(Email $mail): string
+    { return $mail->messageId() ?? $mail->id() ?? 'object:' . spl_object_id($mail); }
+
     public function contactFindByEmail(string $email): ?Contact
     {
         $email = $this->normalizeEmail($email);
@@ -115,6 +148,15 @@ final class SqliteStorage implements AutomationStorage
             $this->pdo->commit();
         } catch (\Throwable $e) { $this->pdo->rollBack(); throw $e; }
         return $this->contactFindById($id) ?? throw new \RuntimeException('Contact creation failed.');
+    }
+
+    public function contactAll(): iterable
+    {
+        $stmt = $this->pdo->query('SELECT id FROM contacts ORDER BY lower(name), lower(primary_email), id');
+        while (($id = $stmt->fetchColumn()) !== false) {
+            $contact = $this->contactFindById((string)$id);
+            if ($contact !== null) { yield $contact; }
+        }
     }
 
     public function contactSetName(string $id, string $name): void
@@ -175,6 +217,50 @@ final class SqliteStorage implements AutomationStorage
         return $out;
     }
 
+    public function tagSet(string $scope, string $scopeId, string $name, ?string $value = null): void
+    {
+        $name = $this->normalizeTagName($name);
+        $this->pdo->prepare('INSERT INTO tags(scope,scope_id,name,value) VALUES(?,?,?,?) ON CONFLICT(scope,scope_id,name) DO UPDATE SET value=excluded.value')
+            ->execute([$scope,$scopeId,$name,$value]);
+    }
+
+    public function tagHas(string $scope, string $scopeId, string $name, ?string $value = null): bool
+    {
+        $name = $this->normalizeTagName($name);
+        if ($value === null) {
+            $stmt = $this->pdo->prepare('SELECT 1 FROM tags WHERE scope=? AND scope_id=? AND name=?');
+            $stmt->execute([$scope,$scopeId,$name]);
+        } else {
+            $stmt = $this->pdo->prepare('SELECT 1 FROM tags WHERE scope=? AND scope_id=? AND name=? AND value=?');
+            $stmt->execute([$scope,$scopeId,$name,$value]);
+        }
+        return $stmt->fetchColumn() !== false;
+    }
+
+    public function tagValue(string $scope, string $scopeId, string $name): ?string
+    {
+        $name = $this->normalizeTagName($name);
+        $stmt = $this->pdo->prepare('SELECT value FROM tags WHERE scope=? AND scope_id=? AND name=?');
+        $stmt->execute([$scope,$scopeId,$name]);
+        $value = $stmt->fetchColumn();
+        return $value === false ? null : ($value === null ? null : (string)$value);
+    }
+
+    public function tagRemove(string $scope, string $scopeId, string $name): void
+    {
+        $name = $this->normalizeTagName($name);
+        $this->pdo->prepare('DELETE FROM tags WHERE scope=? AND scope_id=? AND name=?')->execute([$scope,$scopeId,$name]);
+    }
+
+    public function tagAll(string $scope, string $scopeId): array
+    {
+        $stmt = $this->pdo->prepare('SELECT name,value FROM tags WHERE scope=? AND scope_id=? ORDER BY name');
+        $stmt->execute([$scope,$scopeId]);
+        $out = [];
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) { $out[$row['name']] = $row['value']; }
+        return $out;
+    }
+
     public function recordSent(Email $mail, string $folder, string $recipientEmail): void
     {
         if ($mail->messageId() === null || $mail->id() === null) { return; }
@@ -190,12 +276,42 @@ final class SqliteStorage implements AutomationStorage
 
     public function recordHistory(?string $contactId, Email $mail, string $direction, string $folder): void
     {
-        $this->pdo->prepare('INSERT INTO mail_history(contact_id,message_id,direction,folder,server_id,observed_at) VALUES(?,?,?,?,?,?)')->execute([$contactId,$mail->messageId(),$direction,$folder,$mail->id(),(new \DateTimeImmutable())->format(DATE_ATOM)]);
+        $this->pdo->prepare('INSERT INTO mail_history(contact_id,message_id,direction,folder,server_id,subject,mail_date,tag_scope_id,observed_at) VALUES(?,?,?,?,?,?,?,?,?)')
+            ->execute([
+                $contactId,
+                $mail->messageId(),
+                $direction,
+                $folder,
+                $mail->id(),
+                $mail->subject(),
+                $mail->date()?->format(DATE_ATOM),
+                $this->messageTagScopeId($mail),
+                (new DateTimeImmutable())->format(DATE_ATOM),
+            ]);
     }
 
-    public function historyForContact(string $contactId): array
+    public function historyForContact(string $contactId): iterable
     {
-        $stmt = $this->pdo->prepare('SELECT message_id,direction,folder,server_id,observed_at FROM mail_history WHERE contact_id=? ORDER BY id'); $stmt->execute([$contactId]);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $stmt = $this->pdo->prepare(
+            'SELECT id,message_id,direction,folder,server_id,subject,mail_date,tag_scope_id,observed_at
+             FROM mail_history
+             WHERE contact_id=?
+             ORDER BY julianday(COALESCE(mail_date, observed_at)) DESC, id DESC'
+        );
+        $stmt->execute([$contactId]);
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            yield new MailHistoryEntry(
+                (int)$row['id'],
+                $this,
+                $row['message_id'],
+                $row['direction'],
+                $row['folder'],
+                $row['server_id'],
+                $row['subject'] ?? '',
+                $row['mail_date'] === null ? null : new DateTimeImmutable($row['mail_date']),
+                new DateTimeImmutable($row['observed_at']),
+                $row['tag_scope_id'] ?? ($row['message_id'] ?? $row['server_id'] ?? 'history:' . $row['id']),
+            );
+        }
     }
 }
