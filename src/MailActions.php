@@ -40,8 +40,16 @@ final class MailActions
         return $this->queue('removeFlag', [$flag]);
     }
 
-    public function moveTo(string $folder, bool $reprocess = false): self
-    { return $this->queue('moveTo', [$folder,$reprocess]); }
+    /**
+     * Move to a managed folder alias declared in MailClient mailbox config `managedFolders`.
+     * Example config: `managedFolders: { customers: Customers }`, then call `moveTo('customers')`.
+     */
+    public function moveTo(string $folderAlias, bool $reprocess = false): self
+    { return $this->queue('moveTo', [$folderAlias,$reprocess]); }
+
+    /** Move to an exact existing IMAP folder name without managed-folder alias resolution. */
+    public function moveToRaw(string $folder, bool $reprocess = false): self
+    { return $this->queue('moveToRaw', [$folder,$reprocess]); }
 
     public function sendReply(string $markdown): self
     { return $this->queue('sendReply', [$markdown]); }
