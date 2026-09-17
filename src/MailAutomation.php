@@ -65,11 +65,12 @@ final class MailAutomation
         ?PhoreLogger $logger = null,
     ) {
         $this->logger = ($logger ?? PhoreLogger::GetInstance())->scope('mailAutomation');
+        $configuredFlags = method_exists($client, 'automationFlags') ? $client->automationFlags() : [];
         $this->automationFlags = array_replace([
             'processed'=>self::PROCESSED_FLAG,
             'error'=>self::ERROR_FLAG,
             'actionRequired'=>self::ACTION_REQUIRED_FLAG,
-        ], $client->automationFlags());
+        ], $configuredFlags);
         if (is_string($storage)) {
             if ($storage === '') { throw new \InvalidArgumentException('SQLite storage path must not be empty.'); }
             $storage = new PDO('sqlite:' . $storage);
