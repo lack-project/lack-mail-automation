@@ -91,7 +91,7 @@ final class ScheduledMailActions implements MailAction
 
     private static function assertNotDefaultAutomationFlag(string $flag): void
     {
-        if (in_array($flag, [MailAutomation::PROCESSED_FLAG, MailAutomation::ERROR_FLAG, MailAutomation::ACTION_REQUIRED_FLAG], true)) {
+        if (in_array($flag, array_values(MailAutomation::DEFAULT_AUTOMATION_FLAGS), true)) {
             throw new \InvalidArgumentException($flag . ' is reserved by the automation engine.');
         }
     }
