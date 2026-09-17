@@ -233,11 +233,23 @@ final class MailAutomation
                     $report->skipped++;
                     continue;
                 }
+                $direction = $isSent ? 'outgoing' : 'incoming';
                 try {
-                    $this->processMessage($mail, $folder, $isSent ? 'outgoing' : 'incoming', $dryRun, $report);
+                    $this->processMessage($mail, $folder, $direction, $dryRun, $report);
                 } catch (\Throwable $error) {
-                    $log->error('Message processing failed: {}', [$error->getMessage(), 'exception' => $error]);
-                    $report->addError($folder, $mail->messageId(), $error);
+                    $senders = array_map(static fn($address): string => $address->getAddress(), $mail->from());
+                    $messageError = new \RuntimeException(sprintf(
+                        'Message processing failed: %s Processing context: operation="process %s message", folder="%s", message-id="%s", from="%s", date="%s", subject="%s".',
+                        $error->getMessage(),
+                        $direction,
+                        $folder,
+                        $mail->messageId() ?? $mail->id() ?? 'unknown',
+                        $senders === [] ? 'unknown' : implode(', ', $senders),
+                        $mail->date()?->format(DATE_ATOM) ?? 'unknown',
+                        $mail->subject(),
+                    ), previous: $error);
+                    $log->error('{:full}', [$messageError->getMessage(), 'exception' => $messageError]);
+                    $report->addError($folder, $mail->messageId(), $messageError);
                     return;
                 }
             }

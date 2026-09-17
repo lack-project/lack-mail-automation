@@ -52,6 +52,37 @@ final class MailAutomationTest extends TestCase
         self::assertSame(1, $calls);
     }
 
+    public function testProcessingErrorContainsOperationAndMessageContext(): void
+    {
+        [$automation, $transport] = $this->fixture();
+        $transport->addMessage('INBOX', 11, $this->headers(
+            from: 'sender@example.org',
+            to: 'me@example.org',
+            messageId: 'failed@example.org',
+        ));
+
+        $cause = new \RuntimeException('request failed: Empty response');
+        $automation->register(
+            Folder::Inbox,
+            static fn(Email $mail, MailContext $context): bool => true,
+            static function (Email $mail, MailContext $context) use ($cause): MailActions {
+                throw $cause;
+            },
+            automationId: 'failing-rule',
+        );
+
+        $report = $automation->run();
+
+        self::assertFalse($report->successful());
+        self::assertCount(1, $report->errors());
+        $error = $report->errors()[0]->error;
+        self::assertSame($cause, $error->getPrevious());
+        self::assertSame(
+            'Message processing failed: request failed: Empty response Processing context: operation="process incoming message", folder="INBOX", message-id="failed@example.org", from="sender@example.org", date="2026-02-19T10:15:00+00:00", subject="Test failed@example.org".',
+            $error->getMessage(),
+        );
+    }
+
     public function testDryRunIsVisibleInContextAndCanBeRepeatedWithoutCheckpoint(): void
     {
         [$automation, $transport] = $this->fixture();
@@ -213,6 +244,7 @@ final class MailAutomationTest extends TestCase
             'From: ' . $from,
             'To: ' . $to,
             'Subject: Test ' . $messageId,
+            'Date: Thu, 19 Feb 2026 10:15:00 +0000',
             'Message-ID: <' . $messageId . '>',
         ];
         if ($inReplyTo !== null) {
@@ -246,6 +278,17 @@ final class TestSyncTransport implements SyncTransport
         }
         $this->folder = $folder;
         return ['uidvalidity' => $this->validity];
+    }
+
+    public function folderExists(string $folder): bool
+    {
+        return isset($this->messages[$folder]);
+    }
+
+    public function createFolder(string $folder): void
+    {
+        $this->messages[$folder] ??= [];
+        $this->headers[$folder] ??= [];
     }
 
     public function search(array $criteria): array
