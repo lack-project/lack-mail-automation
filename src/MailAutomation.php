@@ -396,8 +396,12 @@ final class MailAutomation
                     $current = $this->client->removeFlag($current,$item['args'][0]);
                     break;
                 case 'sendReply':
-                    if ($this->sender === null) { throw new \RuntimeException('sendReply requires a DraftSender.'); }
-                    $this->sender->send($this->client->reply($current,$item['args'][0]));
+                    $reply = $this->client->reply($current,$item['args'][0]);
+                    if ($this->sender === null) {
+                        $this->client->saveDraft($reply);
+                    } else {
+                        $this->sender->send($reply);
+                    }
                     break;
                 case 'moveTo':
                     [$alias,$handoff] = $item['args'];

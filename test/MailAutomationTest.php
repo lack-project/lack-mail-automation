@@ -3,6 +3,7 @@ declare(strict_types=1);
 namespace Lack\MailAutomation\Test;
 
 use Lack\MailAutomation\ContactResolutionStatus;
+use Lack\MailAutomation\DraftSender;
 use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
@@ -287,6 +288,53 @@ final class MailAutomationTest extends TestCase
         );
     }
 
+    public function testSendReplySavesDraftByDefault(): void
+    {
+        [$automation, $transport] = $this->fixture();
+        $transport->addMessage('INBOX', 12, $this->headers(
+            from: 'customer@example.org',
+            to: 'me@example.org',
+            messageId: 'draft-reply@example.org',
+        ));
+        $automation->register(
+            Folder::Inbox,
+            static fn(Email $mail, MailContext $context): bool => true,
+            static fn(Email $mail, MailContext $context): MailAction => MailActions::schedule()->sendReply('Draft answer'),
+            automationId: 'draft-reply',
+        );
+
+        self::assertTrue($automation->run()->successful());
+        self::assertCount(1, $transport->messages['Drafts']);
+        self::assertStringContainsString('Draft answer', reset($transport->rawMessages['Drafts']));
+    }
+
+    public function testSendReplyUsesConfiguredSenderInsteadOfSavingDraft(): void
+    {
+        $transport = new TestSyncTransport();
+        $client = new MailClient($transport, 'test-account', from: 'me@example.org');
+        $sender = new class implements DraftSender {
+            public ?Email $sent = null;
+            public function send(Email $draft): void { $this->sent = $draft; }
+        };
+        $automation = new MailAutomation($client, new PDO('sqlite::memory:'), sender: $sender);
+        $transport->addMessage('INBOX', 13, $this->headers(
+            from: 'customer@example.org',
+            to: 'me@example.org',
+            messageId: 'sent-reply@example.org',
+        ));
+        $automation->register(
+            Folder::Inbox,
+            static fn(Email $mail, MailContext $context): bool => true,
+            static fn(Email $mail, MailContext $context): MailAction => MailActions::schedule()->sendReply('Sent answer'),
+            automationId: 'sent-reply',
+        );
+
+        self::assertTrue($automation->run()->successful());
+        self::assertNotNull($sender->sent);
+        self::assertSame('Sent answer', $sender->sent->body()->markdown());
+        self::assertCount(0, $transport->messages['Drafts']);
+    }
+
     /** @return array{MailAutomation, TestSyncTransport} */
     private function fixture(): array
     {
@@ -320,9 +368,11 @@ final class TestSyncTransport implements SyncTransport
     public string $folder = 'INBOX';
     public int $validity = 7;
     /** @var array<string,array<int,list<string>>> */
-    public array $messages = ['INBOX' => [], 'Sent' => []];
+    public array $messages = ['INBOX' => [], 'Sent' => [], 'Drafts' => []];
     /** @var array<string,array<int,string>> */
-    private array $headers = ['INBOX' => [], 'Sent' => []];
+    public array $rawMessages = ['INBOX' => [], 'Sent' => [], 'Drafts' => []];
+    /** @var array<string,array<int,string>> */
+    private array $headers = ['INBOX' => [], 'Sent' => [], 'Drafts' => []];
 
     public function addMessage(string $folder, int $uid, string $headers, array $flags = []): void
     {
@@ -384,7 +434,10 @@ final class TestSyncTransport implements SyncTransport
 
     public function append(string $folder, string $mime): void
     {
-        throw new \LogicException('Unexpected append.');
+        $uid = $this->messages[$folder] === [] ? 1 : max(array_keys($this->messages[$folder])) + 1;
+        $this->messages[$folder][$uid] = ['\\Draft'];
+        $this->headers[$folder][$uid] = $mime;
+        $this->rawMessages[$folder][$uid] = $mime;
     }
 
     public function flag(int $uid, string $flag, bool $add): void

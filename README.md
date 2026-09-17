@@ -66,7 +66,7 @@ The programmatic `onFolder(Folder|string)->addAutomation()` API remains availabl
 
 Automation handlers return the `MailAction` contract. `MailActions` is the factory for these results; the concrete fluent implementation is `ScheduledMailActions`.
 
-`MailActions::schedule()` starts an empty mutable action schedule. Add actions fluently and return that object from the handler. The handler itself does not execute these queued operations. After the handler returns, `MailAutomation` automatically executes the queued actions in order and only then completes normal processing for the message.
+`MailActions::schedule()` starts an empty mutable action schedule. Add actions fluently and return that object from the handler. The handler itself does not execute these queued operations. After the handler returns, `MailAutomation` automatically executes the queued actions in order and only then completes normal processing for the message. `sendReply()` saves the generated reply in the configured Drafts folder by default. When `MailAutomation` is explicitly constructed with a `DraftSender`, the same action delegates the reply to that sender instead.
 
 ```php
 return MailActions::schedule()
