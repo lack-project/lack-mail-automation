@@ -1,6 +1,7 @@
 <?php
 use Lack\MailAutomation\Attributes\OnFolderAutomation;
 use Lack\MailAutomation\Folder;
+use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailAutomation;
 use Lack\MailAutomation\MailContext;
@@ -18,20 +19,26 @@ $automation = new MailAutomation(
 final class OverviewRules
 {
     #[OnFolderAutomation(Folder::Inbox, priority: 100)]
-    public function review(Email $mail, MailContext $context): MailActions
+    public function review(Email $mail, MailContext $context): MailAction
     {
         if (!$context->contactResolution->needsReview()) {
             return MailActions::pass();
         }
         $context->logger->notice('Route message {} to review', [$mail->messageId() ?? $mail->id() ?? 'unknown']);
-        return MailActions::create()->addFlag('phore_review')->moveTo('review');
+
+        // schedule() collects multiple actions. MailAutomation executes them automatically
+        // after this handler returns the MailAction result.
+        return MailActions::schedule()
+            ->addFlag('phore_review')
+            ->moveTo('review');
     }
 
     #[OnFolderAutomation(Folder::Inbox)]
-    public function customer(Email $mail, MailContext $context): MailActions
+    public function customer(Email $mail, MailContext $context): MailAction
     {
         $context->logger->debug('Route message {} to customers', [$mail->messageId() ?? $mail->id() ?? 'unknown']);
-        return MailActions::create()->moveTo('customers');
+        // Single common actions have convenience factories that pre-fill the same schedule object.
+        return MailActions::moveTo('customers');
     }
 }
 
