@@ -78,10 +78,23 @@ final class ScheduledMailActions implements MailAction
     }
 
     public function addFlag(string $flag): self
-    { return $this->queue('addFlag', [$flag]); }
+    {
+        self::assertNotDefaultAutomationFlag($flag);
+        return $this->queue('addFlag', [$flag]);
+    }
 
     public function removeFlag(string $flag): self
-    { return $this->queue('removeFlag', [$flag]); }
+    {
+        self::assertNotDefaultAutomationFlag($flag);
+        return $this->queue('removeFlag', [$flag]);
+    }
+
+    private static function assertNotDefaultAutomationFlag(string $flag): void
+    {
+        if (in_array($flag, [MailAutomation::PROCESSED_FLAG, MailAutomation::ERROR_FLAG, MailAutomation::ACTION_REQUIRED_FLAG], true)) {
+            throw new \InvalidArgumentException($flag . ' is reserved by the automation engine.');
+        }
+    }
 
     /**
      * Schedule a move to a managed folder alias declared in MailClient mailbox config `managedFolders`.
