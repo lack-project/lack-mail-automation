@@ -322,7 +322,7 @@ final class MailAutomation
                 continue;
             }
             $actions = ($rule->handle)($mail,$context);
-            if (!$actions instanceof MailActions) { throw new \UnexpectedValueException('Automation handlers must return MailActions.'); }
+            if (!$actions instanceof MailAction) { throw new \UnexpectedValueException('Automation handlers must return MailAction.'); }
             if ($actions->isPass()) {
                 $context->logger->debug('Automation {} returned pass', [$rule->id]);
                 continue;
@@ -347,7 +347,7 @@ final class MailAutomation
         $messageLog->debug('Finished message processing: handled={}, reprocess={}', [$handled, $reprocess]);
     }
 
-    private function executeActions(Email $mail, MailActions $actions, PhoreLogger $logger): array
+    private function executeActions(Email $mail, MailAction $actions, PhoreLogger $logger): array
     {
         $current = $mail;
         $reprocess = false;
