@@ -76,6 +76,7 @@ final class MailAutomationTest extends TestCase
 
         self::assertFalse($report->successful());
         self::assertCount(1, $report->errors());
+        self::assertContains(MailAutomation::ERROR_FLAG, $transport->messages['INBOX'][11]);
         $error = $report->errors()[0]->error;
         self::assertSame($cause, $error->getPrevious());
         self::assertSame(
