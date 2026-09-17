@@ -4,28 +4,39 @@ Stateful mail automation for PHP 8.5 on top of `phore/mail-client`. This package
 
 ## Boundary
 
-`phore/mail-client` supplies mailbox primitives: folder synchronization, configured standard folders, account/sender identity, side-effect-free reads, flags, drafts and verified same-account moves. `lack/mail-automation` consumes those APIs and adds SQLite-backed cursors, Sent evidence, contacts and aliases, metadata, tags, rule execution and the `phore_processed` processing gate. No IMAP transport implementation is duplicated here.
-
-During development this package depends on `phore/mail-client:dev-feat/folder-sync`; after the corresponding MailClient PR is merged, switch the constraint to the released version containing these primitives.
+`phore/mail-client` supplies mailbox primitives: folder synchronization, configured standard and managed folders, account/sender identity, side-effect-free reads, flags, drafts and verified same-account moves. `lack/mail-automation` consumes those APIs and adds SQLite-backed cursors, Sent evidence, contacts and aliases, metadata, tags, rule execution and the `phore_processed` processing gate. No IMAP transport implementation is duplicated here.
 
 ## Basic run
 
+Define application-owned move targets centrally in the MailClient mailbox configuration. `managedFolders` maps stable application aliases to exact IMAP folder names; the MailClient checks these targets when it starts and creates missing managed folders before returning the connected client.
+
+```yaml
+managedFolders:
+  customers: Customers
+  invoices: Invoices
+  errors: Automation/Errors
+```
+
+Normal automation moves use the alias, not the raw IMAP folder name:
+
 ```php
 <?php
+use Lack\MailAutomation\Attributes\OnFolderAutomation;
 use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailAutomation;
+use Lack\MailAutomation\MailContext;
 use Phore\MailClient\Email;
+
+#[OnFolderAutomation(Folder::Inbox)]
+function routeCustomer(Email $mail, MailContext $context): MailActions
+{
+    return MailActions::create()->moveTo('customers');
+}
 
 $database = new PDO('sqlite:/var/lib/app/mail-automation.sqlite');
 $automation = new MailAutomation(client: $client, storage: $database);
-
-$automation->onFolder(Folder::Inbox)->addAutomation(
-    matches: fn (Email $mail, $context): bool => true,
-    handle: fn (Email $mail, $context): MailActions =>
-        MailActions::create()->moveTo('Customers'),
-);
-
+$automation->addRules('routeCustomer');
 $report = $automation->run();
 ```
 
@@ -39,13 +50,19 @@ The same SQLite database must be reused across runs. Tables for cursors, contact
 
 Unmatched messages are not retried automatically after the folder cursor advances. Any later IMAP flag change causes the normal folder sync to surface that message again, so toggling a mail-client flag such as the star is enough to request another rule evaluation. The automation does not inspect or special-case the star itself; it reacts to the generic flag change reported by the mail client.
 
-`moveTo($folder, reprocess: true)` deliberately hands the moved message to the target folder on a later run. The target must have a registered chain. The engine does not execute the destination chain in the same run.
+`moveTo($folderAlias, reprocess: true)` deliberately hands the moved message to the resolved managed target folder on a later run. The target must have a registered chain. The engine does not execute the destination chain in the same run.
 
 ## Rules
 
-Use `onFolder(Folder|string)->addAutomation()` for programmatic rules. Higher priority runs first; ties keep registration order. `matches=false` skips a rule. Exceptions stop processing for the message and are exposed through `RunReport::errors()`.
+Use attributed functions or public methods with `#[OnFolderAutomation(...)]` and register them through `addRules()`. Higher priority runs first; ties keep registration order. `matches=false` skips a rule. Exceptions stop processing for the message and are exposed through `RunReport::errors()`.
 
-Attributed functions and public methods can use `#[OnFolderAutomation(...)]` from `Lack\MailAutomation\Attributes`. `addRules()` compiles these into the same rule model. `active: false` disables only that rule. `flag:` requires the current IMAP keyword in addition to the generated match.
+The programmatic `onFolder(Folder|string)->addAutomation()` API remains available for cases that explicitly need programmatic registration. `active: false` disables only that rule. `flag:` requires the current IMAP keyword in addition to the generated match.
+
+## Folder moves
+
+`MailActions::moveTo('customers')` is the default and safe move API. Its argument is a managed folder alias from the MailClient mailbox configuration `managedFolders`. The alias is resolved before the IMAP move. If it is missing, processing fails before the move with an error such as `Unknown managed folder alias "costumers". Define it in mailbox config "managedFolders".` This prevents a typo in a rule from silently targeting another folder name.
+
+`MailActions::moveToRaw('Legacy/Exact')` is the explicit escape hatch for an exact IMAP folder name that is intentionally not managed through the alias configuration. It bypasses only alias resolution; the MailClient still requires the target folder to exist. Both methods accept `reprocess: true`.
 
 ## Contacts and reply evidence
 
@@ -109,7 +126,7 @@ Four application-owned scopes are available as independent `MetadataBag`s: `Mail
 
 ## Actions and reports
 
-`MailActions::create()` can add/remove ordinary keywords, move the current message and request a reply through an application-provided `DraftSender`. `MailActions::complete()` finishes without mail actions, and `MailActions::pass()` delegates.
+`MailActions::create()` can add/remove ordinary keywords, move the current message by managed alias or exact raw folder name, and request a reply through an application-provided `DraftSender`. `MailActions::complete()` finishes without mail actions, and `MailActions::pass()` delegates.
 
 `RunReport` exposes `processed`, `skipped`, `indexedSent`, `successful()` and `errors()`. Each `RunError` contains the folder, message ID when known and original exception.
 

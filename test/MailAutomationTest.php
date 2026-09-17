@@ -78,7 +78,7 @@ final class MailAutomationTest extends TestCase
         $error = $report->errors()[0]->error;
         self::assertSame($cause, $error->getPrevious());
         self::assertSame(
-            'Message processing failed: request failed: Empty response Processing context: operation="process incoming message", folder="INBOX", message-id="failed@example.org", from="sender@example.org", date="2026-02-19T10:15:00+00:00", subject="Test failed@example.org".',
+            'Message processing failed: request failed: Empty response Processing context: operation="process incoming message", folder="INBOX", message-id="<failed@example.org>", from="sender@example.org", date="2026-02-19T10:15:00+00:00", subject="Test failed@example.org".',
             $error->getMessage(),
         );
     }

@@ -365,6 +365,13 @@ final class MailAutomation
                     $this->sender->send($this->client->reply($current,$item['args'][0]));
                     break;
                 case 'moveTo':
+                    [$alias,$handoff] = $item['args'];
+                    $target = $this->client->managedFolder($alias);
+                    $current = $this->client->moveTo($current,$target);
+                    $reprocess = (bool)$handoff;
+                    if ($reprocess && $this->rulesFor($target) === []) { throw new \RuntimeException('Reprocess target has no registered automation chain.'); }
+                    break;
+                case 'moveToRaw':
                     [$target,$handoff] = $item['args'];
                     $current = $this->client->moveTo($current,$target);
                     $reprocess = (bool)$handoff;
