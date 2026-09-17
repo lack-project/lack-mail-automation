@@ -2,12 +2,13 @@
 use Lack\MailAutomation\Attributes\OnFolderAutomation;
 use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\HistoryFilter;
+use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailContext;
 use Phore\MailClient\Email;
 
 #[OnFolderAutomation(folder: Folder::Inbox)]
-function handleCustomerHistory(Email $mail, MailContext $context): MailActions
+function handleCustomerHistory(Email $mail, MailContext $context): MailAction
 {
     if ($context->contact === null) {
         return MailActions::pass();

@@ -4,6 +4,7 @@ namespace Lack\MailAutomation\Test;
 
 use Lack\MailAutomation\ContactResolutionStatus;
 use Lack\MailAutomation\Folder;
+use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailAutomation;
 use Lack\MailAutomation\MailContext;
@@ -28,11 +29,11 @@ final class MailAutomationTest extends TestCase
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static function (Email $mail, MailContext $context) use (&$calls): MailActions {
+            static function (Email $mail, MailContext $context) use (&$calls): MailAction {
                 $calls++;
                 self::assertSame('incoming', $context->direction);
                 self::assertSame(ContactResolutionStatus::Unknown, $context->contactResolution->status);
-                return MailActions::create()->addFlag('classified');
+                return MailActions::schedule()->addFlag('classified');
             },
             automationId: 'normal-flow',
         );
@@ -65,7 +66,7 @@ final class MailAutomationTest extends TestCase
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static function (Email $mail, MailContext $context) use ($cause): MailActions {
+            static function (Email $mail, MailContext $context) use ($cause): MailAction {
                 throw $cause;
             },
             automationId: 'failing-rule',
@@ -96,7 +97,7 @@ final class MailAutomationTest extends TestCase
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static function (Email $mail, MailContext $context) use (&$calls): MailActions {
+            static function (Email $mail, MailContext $context) use (&$calls): MailAction {
                 self::assertTrue($context->dryRun);
                 $calls++;
                 return MailActions::complete();
@@ -124,7 +125,7 @@ final class MailAutomationTest extends TestCase
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static function (Email $mail, MailContext $context) use (&$seenStatus): MailActions {
+            static function (Email $mail, MailContext $context) use (&$seenStatus): MailAction {
                 $seenStatus = $context->contactResolution->status;
                 return MailActions::complete();
             },
@@ -167,7 +168,7 @@ final class MailAutomationTest extends TestCase
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static function (Email $mail, MailContext $context) use (&$needsReview): MailActions {
+            static function (Email $mail, MailContext $context) use (&$needsReview): MailAction {
                 $needsReview = $context->contactResolution->needsReview();
                 self::assertSame(ContactResolutionStatus::OutgoingMissing, $context->contactResolution->status);
                 return MailActions::complete();
@@ -198,7 +199,7 @@ final class MailAutomationTest extends TestCase
             static function (Email $mail, MailContext $context) use (&$matches): bool {
                 return $matches;
             },
-            static function (Email $mail, MailContext $context) use (&$calls): MailActions {
+            static function (Email $mail, MailContext $context) use (&$calls): MailAction {
                 $calls++;
                 return MailActions::complete();
             },
@@ -238,7 +239,7 @@ final class MailAutomationTest extends TestCase
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static function (Email $mail, MailContext $context) use (&$calls): MailActions {
+            static function (Email $mail, MailContext $context) use (&$calls): MailAction {
                 $calls[] = 'high';
                 return MailActions::pass();
             },
@@ -248,9 +249,9 @@ final class MailAutomationTest extends TestCase
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static function (Email $mail, MailContext $context) use (&$calls): MailActions {
+            static function (Email $mail, MailContext $context) use (&$calls): MailAction {
                 $calls[] = 'normal';
-                return MailActions::create()->addFlag('handled');
+                return MailActions::schedule()->addFlag('handled');
             },
             priority: 0,
             automationId: 'normal',
@@ -264,7 +265,7 @@ final class MailAutomationTest extends TestCase
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static fn(Email $mail, MailContext $context): MailActions => MailActions::complete(),
+            static fn(Email $mail, MailContext $context): MailAction => MailActions::complete(),
             automationId: 'normal',
         );
     }

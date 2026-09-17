@@ -2,7 +2,48 @@
 declare(strict_types=1);
 namespace Lack\MailAutomation;
 
+interface MailAction
+{
+    public function isPass(): bool;
+    public function isComplete(): bool;
+    /** @return list<array{type:string,args:array}> */
+    public function items(): array;
+}
+
+/** Factory for mail-action results returned by automation handlers. */
 final class MailActions
+{
+    private function __construct() {}
+
+    /**
+     * Start a mutable fluent action schedule.
+     * Scheduled actions are executed automatically by MailAutomation after the handler returns.
+     */
+    public static function schedule(): ScheduledMailActions
+    { return ScheduledMailActions::schedule(); }
+
+    /** Convenience factory for a managed-folder move. */
+    public static function moveTo(string $folderAlias, bool $reprocess = false): ScheduledMailActions
+    { return self::schedule()->moveTo($folderAlias,$reprocess); }
+
+    /** Convenience factory for an exact existing IMAP-folder move. */
+    public static function moveToRaw(string $folder, bool $reprocess = false): ScheduledMailActions
+    { return self::schedule()->moveToRaw($folder,$reprocess); }
+
+    /** Delegate this message to the next matching automation rule without executing actions. */
+    public static function pass(): ScheduledMailActions
+    { return ScheduledMailActions::pass(); }
+
+    /** Finish this message as handled without executing mail actions. */
+    public static function complete(): ScheduledMailActions
+    { return ScheduledMailActions::complete(); }
+}
+
+/**
+ * Mutable fluent result used to schedule mail modifications.
+ * MailAutomation executes queued actions only after the handler has returned this object.
+ */
+final class ScheduledMailActions implements MailAction
 {
     private const MODE_ACTIONS = 'actions';
     private const MODE_PASS = 'pass';
@@ -13,7 +54,7 @@ final class MailActions
 
     private function __construct(private string $mode) {}
 
-    public static function create(): self { return new self(self::MODE_ACTIONS); }
+    public static function schedule(): self { return new self(self::MODE_ACTIONS); }
     public static function pass(): self { return new self(self::MODE_PASS); }
     public static function complete(): self { return new self(self::MODE_COMPLETE); }
 
@@ -23,7 +64,7 @@ final class MailActions
 
     private function queue(string $type, array $args): self
     {
-        if ($this->mode !== self::MODE_ACTIONS) { throw new \LogicException('pass() and complete() cannot contain actions.'); }
+        if ($this->mode !== self::MODE_ACTIONS) { throw new \LogicException('pass() and complete() cannot contain scheduled actions.'); }
         $this->actions[] = ['type'=>$type,'args'=>$args];
         return $this;
     }
@@ -41,13 +82,13 @@ final class MailActions
     }
 
     /**
-     * Move to a managed folder alias declared in MailClient mailbox config `managedFolders`.
+     * Schedule a move to a managed folder alias declared in MailClient mailbox config `managedFolders`.
      * Example config: `managedFolders: { customers: Customers }`, then call `moveTo('customers')`.
      */
     public function moveTo(string $folderAlias, bool $reprocess = false): self
     { return $this->queue('moveTo', [$folderAlias,$reprocess]); }
 
-    /** Move to an exact existing IMAP folder name without managed-folder alias resolution. */
+    /** Schedule a move to an exact existing IMAP folder name without alias resolution. */
     public function moveToRaw(string $folder, bool $reprocess = false): self
     { return $this->queue('moveToRaw', [$folder,$reprocess]); }
 

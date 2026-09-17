@@ -3,6 +3,7 @@ declare(strict_types=1);
 namespace Lack\MailAutomation\Test;
 
 use Lack\MailAutomation\Folder;
+use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailAutomation;
 use Lack\MailAutomation\MailContext;
@@ -21,7 +22,7 @@ final class ManagedFolderMoveTest extends TestCase
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static fn(Email $mail, MailContext $context): MailActions => MailActions::create()->moveTo('customers'),
+            static fn(Email $mail, MailContext $context): MailAction => MailActions::moveTo('customers'),
             automationId:'managed-move',
         );
 
@@ -39,7 +40,7 @@ final class ManagedFolderMoveTest extends TestCase
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static fn(Email $mail, MailContext $context): MailActions => MailActions::create()->moveTo('costumers'),
+            static fn(Email $mail, MailContext $context): MailAction => MailActions::moveTo('costumers'),
             automationId:'unknown-alias',
         );
 
@@ -58,7 +59,7 @@ final class ManagedFolderMoveTest extends TestCase
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static fn(Email $mail, MailContext $context): MailActions => MailActions::create()->moveToRaw('Legacy/Exact'),
+            static fn(Email $mail, MailContext $context): MailAction => MailActions::moveToRaw('Legacy/Exact'),
             automationId:'raw-move',
         );
 

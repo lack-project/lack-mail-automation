@@ -145,7 +145,7 @@ final class SqliteStorageTest extends TestCase
     public function testProcessedMarkerIsReserved(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        MailActions::create()->addFlag('phore_processed');
+        MailActions::schedule()->addFlag('phore_processed');
     }
 
     private function mail(string $id, string $subject, string $date): Email

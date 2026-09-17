@@ -1,6 +1,7 @@
 <?php
 use Lack\MailAutomation\Attributes\OnFolderAutomation;
 use Lack\MailAutomation\Folder;
+use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailContext;
 use Lack\MailAutomation\MetadataBag;
@@ -16,7 +17,7 @@ final class CustomerMetadata
 final class CustomerRules
 {
     #[OnFolderAutomation(folder: Folder::Inbox, priority: 150)]
-    public function route(Email $mail, MailContext $context): MailActions
+    public function route(Email $mail, MailContext $context): MailAction
     {
         if ($context->contact === null) {
             $context->logger->debug('Pass message without resolved contact');
@@ -26,10 +27,10 @@ final class CustomerRules
         $customer = $context->contact->metadata->typed(CustomerMetadata::class);
         $customer->markReviewed();
 
-        $target = $customer->isB2b() ? 'B2B' : 'Customers';
+        $target = $customer->isB2b() ? 'b2b' : 'customers';
         $context->logger->scope('customer')->info('Route contact {} to {}', [$context->contact->id, $target]);
 
-        return MailActions::create()->moveTo($target);
+        return MailActions::moveTo($target);
     }
 }
 
