@@ -40,9 +40,11 @@ final class FolderRegistration
 
 final class MailAutomation
 {
-    public const PROCESSED_FLAG = 'lack_processed';
-    public const ERROR_FLAG = 'lack_error';
-    public const ACTION_REQUIRED_FLAG = 'lack_action_required';
+    public const DEFAULT_AUTOMATION_FLAGS = [
+        'processed' => 'lack_processed',
+        'error' => 'lack_error',
+        'actionRequired' => 'lack_action_required',
+    ];
 
     private AutomationStorage $storage;
     private ContactResolver $resolver;
@@ -65,11 +67,7 @@ final class MailAutomation
         ?PhoreLogger $logger = null,
     ) {
         $this->logger = ($logger ?? PhoreLogger::GetInstance())->scope('mailAutomation');
-        $this->automationFlags = array_replace([
-            'processed'=>self::PROCESSED_FLAG,
-            'error'=>self::ERROR_FLAG,
-            'actionRequired'=>self::ACTION_REQUIRED_FLAG,
-        ], $client->automationFlags());
+        $this->automationFlags = array_replace(self::DEFAULT_AUTOMATION_FLAGS, $client->automationFlags());
         if (is_string($storage)) {
             if ($storage === '') { throw new \InvalidArgumentException('SQLite storage path must not be empty.'); }
             $storage = new PDO('sqlite:' . $storage);
