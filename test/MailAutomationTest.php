@@ -44,7 +44,7 @@ final class MailAutomationTest extends TestCase
         self::assertSame(1, $report->processed);
         self::assertSame(1, $calls);
         self::assertContains('classified', $transport->messages['INBOX'][1]);
-        self::assertContains(MailAutomation::PROCESSED_FLAG, $transport->messages['INBOX'][1]);
+        self::assertContains(MailAutomation::DEFAULT_AUTOMATION_FLAGS['processed'], $transport->messages['INBOX'][1]);
 
         $second = $automation->run();
         self::assertTrue($second->successful());
@@ -76,6 +76,8 @@ final class MailAutomationTest extends TestCase
 
         self::assertFalse($report->successful());
         self::assertCount(1, $report->errors());
+        self::assertContains(MailAutomation::DEFAULT_AUTOMATION_FLAGS['error'], $transport->messages['INBOX'][11]);
+        self::assertNotContains(MailAutomation::DEFAULT_AUTOMATION_FLAGS['processed'], $transport->messages['INBOX'][11]);
         $error = $report->errors()[0]->error;
         self::assertSame($cause, $error->getPrevious());
         self::assertSame(
@@ -108,7 +110,7 @@ final class MailAutomationTest extends TestCase
         self::assertSame(1, $automation->run(dryRun: true)->processed);
         self::assertSame(1, $automation->run(dryRun: true)->processed);
         self::assertSame(2, $calls);
-        self::assertNotContains(MailAutomation::PROCESSED_FLAG, $transport->messages['INBOX'][1]);
+        self::assertNotContains(MailAutomation::DEFAULT_AUTOMATION_FLAGS['processed'], $transport->messages['INBOX'][1]);
         self::assertNull($automation->storage()->cursor('INBOX'));
     }
 
@@ -154,7 +156,7 @@ final class MailAutomationTest extends TestCase
         self::assertSame($byOldAddress->id, $byNewAddress->id);
     }
 
-    public function testMissingOutgoingReplyIsExposedAsNeedsReview(): void
+    public function testActionRequiredBlocksFurtherProcessingUntilFlagIsCleared(): void
     {
         [$automation, $transport] = $this->fixture();
         $transport->addMessage('INBOX', 2, $this->headers(
@@ -164,23 +166,38 @@ final class MailAutomationTest extends TestCase
             inReplyTo: 'missing@example.org',
         ));
 
-        $needsReview = false;
+        $calls = 0;
         $automation->register(
             Folder::Inbox,
             static fn(Email $mail, MailContext $context): bool => true,
-            static function (Email $mail, MailContext $context) use (&$needsReview): MailAction {
-                $needsReview = $context->contactResolution->needsReview();
+            static function (Email $mail, MailContext $context) use (&$calls): MailAction {
+                $calls++;
+                self::assertTrue($context->contactResolution->needsReview());
                 self::assertSame(ContactResolutionStatus::OutgoingMissing, $context->contactResolution->status);
-                return MailActions::complete();
+                return MailActions::actionRequired();
             },
             automationId: 'missing-outgoing',
         );
 
-        $report = $automation->run();
+        $first = $automation->run();
+        self::assertTrue($first->successful());
+        self::assertSame(1, $calls);
+        self::assertContains(MailAutomation::DEFAULT_AUTOMATION_FLAGS['actionRequired'], $transport->messages['INBOX'][2]);
+        self::assertNotContains(MailAutomation::DEFAULT_AUTOMATION_FLAGS['processed'], $transport->messages['INBOX'][2]);
 
-        self::assertTrue($report->successful());
-        self::assertTrue($needsReview);
-        self::assertContains(MailAutomation::PROCESSED_FLAG, $transport->messages['INBOX'][2]);
+        $transport->select('INBOX', true);
+        $transport->flag(2, '\\Flagged', true);
+        $blocked = $automation->run();
+        self::assertTrue($blocked->successful());
+        self::assertSame(1, $blocked->skipped);
+        self::assertSame(1, $calls);
+
+        $transport->select('INBOX', true);
+        $transport->flag(2, MailAutomation::DEFAULT_AUTOMATION_FLAGS['actionRequired'], false);
+        $retried = $automation->run();
+        self::assertTrue($retried->successful());
+        self::assertSame(2, $calls);
+        self::assertContains(MailAutomation::DEFAULT_AUTOMATION_FLAGS['actionRequired'], $transport->messages['INBOX'][2]);
     }
 
     public function testUnmatchedMessageStaysUnprocessedAndFlagChangeRetriesIt(): void
@@ -212,7 +229,7 @@ final class MailAutomationTest extends TestCase
         self::assertSame(0, $first->processed);
         self::assertSame(1, $first->skipped);
         self::assertSame(0, $calls);
-        self::assertNotContains(MailAutomation::PROCESSED_FLAG, $transport->messages['INBOX'][4]);
+        self::assertNotContains(MailAutomation::DEFAULT_AUTOMATION_FLAGS['processed'], $transport->messages['INBOX'][4]);
 
         $matches = true;
         $transport->select('INBOX', true);
@@ -223,7 +240,7 @@ final class MailAutomationTest extends TestCase
         self::assertTrue($second->successful());
         self::assertSame(1, $second->processed);
         self::assertSame(1, $calls);
-        self::assertContains(MailAutomation::PROCESSED_FLAG, $transport->messages['INBOX'][4]);
+        self::assertContains(MailAutomation::DEFAULT_AUTOMATION_FLAGS['processed'], $transport->messages['INBOX'][4]);
     }
 
     public function testPassFallsThroughByPriorityAndDuplicateIdsAreRejected(): void

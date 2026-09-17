@@ -6,6 +6,7 @@ interface MailAction
 {
     public function isPass(): bool;
     public function isComplete(): bool;
+    public function isActionRequired(): bool;
     /** @return list<array{type:string,args:array}> */
     public function items(): array;
 }
@@ -37,6 +38,10 @@ final class MailActions
     /** Finish this message as handled without executing mail actions. */
     public static function complete(): ScheduledMailActions
     { return ScheduledMailActions::complete(); }
+
+    /** Stop automatic processing until a human clears the configured action-required IMAP keyword. */
+    public static function actionRequired(): ScheduledMailActions
+    { return ScheduledMailActions::actionRequired(); }
 }
 
 /**
@@ -48,6 +53,7 @@ final class ScheduledMailActions implements MailAction
     private const MODE_ACTIONS = 'actions';
     private const MODE_PASS = 'pass';
     private const MODE_COMPLETE = 'complete';
+    private const MODE_ACTION_REQUIRED = 'action_required';
 
     /** @var list<array{type:string,args:array}> */
     private array $actions = [];
@@ -57,28 +63,37 @@ final class ScheduledMailActions implements MailAction
     public static function schedule(): self { return new self(self::MODE_ACTIONS); }
     public static function pass(): self { return new self(self::MODE_PASS); }
     public static function complete(): self { return new self(self::MODE_COMPLETE); }
+    public static function actionRequired(): self { return new self(self::MODE_ACTION_REQUIRED); }
 
     public function isPass(): bool { return $this->mode === self::MODE_PASS; }
     public function isComplete(): bool { return $this->mode === self::MODE_COMPLETE; }
+    public function isActionRequired(): bool { return $this->mode === self::MODE_ACTION_REQUIRED; }
     public function items(): array { return $this->actions; }
 
     private function queue(string $type, array $args): self
     {
-        if ($this->mode !== self::MODE_ACTIONS) { throw new \LogicException('pass() and complete() cannot contain scheduled actions.'); }
+        if ($this->mode !== self::MODE_ACTIONS) { throw new \LogicException('pass(), complete() and actionRequired() cannot contain scheduled actions.'); }
         $this->actions[] = ['type'=>$type,'args'=>$args];
         return $this;
     }
 
     public function addFlag(string $flag): self
     {
-        if ($flag === 'phore_processed') { throw new \InvalidArgumentException('phore_processed is reserved by the engine.'); }
+        self::assertNotDefaultAutomationFlag($flag);
         return $this->queue('addFlag', [$flag]);
     }
 
     public function removeFlag(string $flag): self
     {
-        if ($flag === 'phore_processed') { throw new \InvalidArgumentException('phore_processed is reserved by the engine.'); }
+        self::assertNotDefaultAutomationFlag($flag);
         return $this->queue('removeFlag', [$flag]);
+    }
+
+    private static function assertNotDefaultAutomationFlag(string $flag): void
+    {
+        if (in_array($flag, array_values(MailAutomation::DEFAULT_AUTOMATION_FLAGS), true)) {
+            throw new \InvalidArgumentException($flag . ' is reserved by the automation engine.');
+        }
     }
 
     /**
