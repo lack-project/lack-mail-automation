@@ -41,6 +41,7 @@ final class FolderRegistration
 final class MailAutomation
 {
     public const PROCESSED_FLAG = 'phore_processed';
+    public const ERROR_FLAG = 'phore_error';
 
     private AutomationStorage $storage;
     private ContactResolver $resolver;
@@ -249,6 +250,14 @@ final class MailAutomation
                         $mail->subject(),
                     ), previous: $error);
                     $log->error('{:full}', [$messageError->getMessage(), 'exception' => $messageError]);
+                    if (!$dryRun) {
+                        try {
+                            $this->client->addFlag($mail, self::ERROR_FLAG);
+                            $log->debug('Marked failed message with error flag {}', [self::ERROR_FLAG]);
+                        } catch (\Throwable $flagError) {
+                            $log->error('Marking failed message with error flag failed: {}', [$flagError->getMessage(), 'exception' => $flagError]);
+                        }
+                    }
                     $report->addError($folder, $mail->messageId(), $messageError);
                     return;
                 }
