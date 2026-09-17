@@ -30,7 +30,7 @@ final class ManagedFolderMoveTest extends TestCase
 
         self::assertTrue($report->successful());
         self::assertArrayNotHasKey(1,$transport->messages['INBOX']);
-        self::assertContains(MailAutomation::PROCESSED_FLAG,$transport->messages['Customers'][1]);
+        self::assertContains(MailAutomation::DEFAULT_AUTOMATION_FLAGS['processed'],$transport->messages['Customers'][1]);
     }
 
     public function testUnknownManagedFolderAliasReportsConfigHint(): void
@@ -67,7 +67,7 @@ final class ManagedFolderMoveTest extends TestCase
 
         self::assertTrue($report->successful());
         self::assertArrayNotHasKey(1,$transport->messages['INBOX']);
-        self::assertContains(MailAutomation::PROCESSED_FLAG,$transport->messages['Legacy/Exact'][1]);
+        self::assertContains(MailAutomation::DEFAULT_AUTOMATION_FLAGS['processed'],$transport->messages['Legacy/Exact'][1]);
     }
 
     /** @return array{MailAutomation,ManagedFolderSyncTransport} */
