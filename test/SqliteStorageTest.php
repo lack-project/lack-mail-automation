@@ -6,6 +6,7 @@ use DateTimeImmutable;
 use Lack\MailAutomation\HistoryFilter;
 use Lack\MailAutomation\HistoryFilterResult;
 use Lack\MailAutomation\MailActions;
+use Lack\MailAutomation\MailAutomation;
 use Lack\MailAutomation\SqliteStorage;
 use PDO;
 use Phore\MailClient\Body;
@@ -145,7 +146,7 @@ final class SqliteStorageTest extends TestCase
     public function testProcessedMarkerIsReserved(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        MailActions::schedule()->addFlag('phore_processed');
+        MailActions::schedule()->addFlag(MailAutomation::PROCESSED_FLAG);
     }
 
     private function mail(string $id, string $subject, string $date): Email
