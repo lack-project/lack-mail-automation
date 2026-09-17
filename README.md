@@ -13,6 +13,9 @@ Define application-owned move targets centrally in the MailClient mailbox config
 ```yaml
 managedFolders:
   customers: Customers
+  review: Review
+  new_contacts: NewContacts
+  b2b: B2B
   invoices: Invoices
   errors: Automation/Errors
 ```
@@ -23,15 +26,16 @@ Normal automation moves use the alias, not the raw IMAP folder name:
 <?php
 use Lack\MailAutomation\Attributes\OnFolderAutomation;
 use Lack\MailAutomation\Folder;
+use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailAutomation;
 use Lack\MailAutomation\MailContext;
 use Phore\MailClient\Email;
 
 #[OnFolderAutomation(Folder::Inbox)]
-function routeCustomer(Email $mail, MailContext $context): MailActions
+function routeCustomer(Email $mail, MailContext $context): MailAction
 {
-    return MailActions::create()->moveTo('customers');
+    return MailActions::moveTo('customers');
 }
 
 $database = new PDO('sqlite:/var/lib/app/mail-automation.sqlite');
@@ -58,11 +62,34 @@ Use attributed functions or public methods with `#[OnFolderAutomation(...)]` and
 
 The programmatic `onFolder(Folder|string)->addAutomation()` API remains available for cases that explicitly need programmatic registration. `active: false` disables only that rule. `flag:` requires the current IMAP keyword in addition to the generated match.
 
+## Scheduled mail actions
+
+Automation handlers return the `MailAction` contract. `MailActions` is the factory for these results; the concrete fluent implementation is `ScheduledMailActions`.
+
+`MailActions::schedule()` starts an empty mutable action schedule. Add actions fluently and return that object from the handler. The handler itself does not execute these queued operations. After the handler returns, `MailAutomation` automatically executes the queued actions in order and only then completes normal processing for the message.
+
+```php
+return MailActions::schedule()
+    ->addFlag('customer')
+    ->moveTo('customers');
+```
+
+Convenience factories create the same `ScheduledMailActions` object with its first action already populated, so action definitions are not duplicated:
+
+```php
+return MailActions::moveTo('customers');
+return MailActions::moveToRaw('Legacy/Exact');
+```
+
+`MailActions::pass()` and `MailActions::complete()` also return the same result type, preconfigured as terminal control-flow results with no queued mail actions. `pass()` delegates to the next rule; `complete()` treats the message as handled without scheduling mail modifications. Terminal results cannot be extended with fluent actions.
+
 ## Folder moves
 
 `MailActions::moveTo('customers')` is the default and safe move API. Its argument is a managed folder alias from the MailClient mailbox configuration `managedFolders`. The alias is resolved before the IMAP move. If it is missing, processing fails before the move with an error such as `Unknown managed folder alias "costumers". Define it in mailbox config "managedFolders".` This prevents a typo in a rule from silently targeting another folder name.
 
 `MailActions::moveToRaw('Legacy/Exact')` is the explicit escape hatch for an exact IMAP folder name that is intentionally not managed through the alias configuration. It bypasses only alias resolution; the MailClient still requires the target folder to exist. Both methods accept `reprocess: true`.
+
+The same moves are available on `MailActions::schedule()` when they need to be combined with flags or other mail actions.
 
 ## Contacts and reply evidence
 
@@ -126,7 +153,7 @@ Four application-owned scopes are available as independent `MetadataBag`s: `Mail
 
 ## Actions and reports
 
-`MailActions::create()` can add/remove ordinary keywords, move the current message by managed alias or exact raw folder name, and request a reply through an application-provided `DraftSender`. `MailActions::complete()` finishes without mail actions, and `MailActions::pass()` delegates.
+`MailActions::schedule()` is the general API for combining mail modifications such as flags, moves and replies. `MailActions::moveTo()` and `MailActions::moveToRaw()` are convenience factories for common single moves. `MailActions::complete()` finishes without mail actions, and `MailActions::pass()` delegates.
 
 `RunReport` exposes `processed`, `skipped`, `indexedSent`, `successful()` and `errors()`. Each `RunError` contains the folder, message ID when known and original exception.
 
