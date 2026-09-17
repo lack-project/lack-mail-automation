@@ -35,7 +35,9 @@ The same SQLite database must be reused across runs. Tables for cursors, contact
 
 `run()` synchronizes the configured Sent folder first, then every folder with registered rules. It uses `MailClient::syncFolder()` and persists the returned cursor only after the observed batch has been processed. On the first Sent scan, existing messages are indexed as reply evidence and marked `phore_processed` without running outgoing business rules by default. Pass `processExistingOutgoing: true` to opt into those rules for existing unmarked Sent mail.
 
-`phore_processed` is the global gate. Marked messages skip contact learning, predicates and handlers. Successful actions, `MailActions::complete()` and an exhausted chain all mark the concrete message processed. `MailActions::pass()` delegates to the next rule without marking it. Generic actions cannot add or remove the reserved processing marker.
+`phore_processed` is the global gate. Marked messages skip contact learning, predicates and handlers. Successful actions and `MailActions::complete()` mark the concrete message processed. If the active rule chain is exhausted without handling the message, it remains unmarked and unchanged. `MailActions::pass()` delegates to the next rule without marking it. Generic actions cannot add or remove the reserved processing marker.
+
+Unmatched messages are not retried automatically after the folder cursor advances. Any later IMAP flag change causes the normal folder sync to surface that message again, so toggling a mail-client flag such as the star is enough to request another rule evaluation. The automation does not inspect or special-case the star itself; it reacts to the generic flag change reported by the mail client.
 
 `moveTo($folder, reprocess: true)` deliberately hands the moved message to the target folder on a later run. The target must have a registered chain. The engine does not execute the destination chain in the same run.
 

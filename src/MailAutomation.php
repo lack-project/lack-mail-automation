@@ -335,6 +335,11 @@ final class MailAutomation
             break;
         }
 
+        if (!$handled) {
+            $report->skipped++;
+            $messageLog->debug('Finished message processing without matching automation');
+            return;
+        }
         if (!$dryRun && !$reprocess) { $final = $this->client->addFlag($final, self::PROCESSED_FLAG); }
         if ($reprocess && $final->messageId() !== null) { $this->deferred[$final->messageId()] = true; }
         $this->storage->recordHistory($resolution->contact?->id,$final,$direction,$folder);
