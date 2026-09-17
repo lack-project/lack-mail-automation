@@ -40,12 +40,15 @@ final class FolderRegistration
 
 final class MailAutomation
 {
-    public const PROCESSED_FLAG = 'phore_processed';
-    public const ERROR_FLAG = 'phore_error';
+    public const PROCESSED_FLAG = 'lack_processed';
+    public const ERROR_FLAG = 'lack_error';
+    public const ACTION_REQUIRED_FLAG = 'lack_action_required';
 
     private AutomationStorage $storage;
     private ContactResolver $resolver;
     private PhoreLogger $logger;
+    /** @var array{processed:string,error:string,actionRequired:string} */
+    private array $automationFlags;
     /** @var list<Rule> */
     private array $rules = [];
     /** @var array<string,true> */
@@ -62,6 +65,11 @@ final class MailAutomation
         ?PhoreLogger $logger = null,
     ) {
         $this->logger = ($logger ?? PhoreLogger::GetInstance())->scope('mailAutomation');
+        $this->automationFlags = array_replace([
+            'processed'=>self::PROCESSED_FLAG,
+            'error'=>self::ERROR_FLAG,
+            'actionRequired'=>self::ACTION_REQUIRED_FLAG,
+        ], $client->automationFlags());
         if (is_string($storage)) {
             if ($storage === '') { throw new \InvalidArgumentException('SQLite storage path must not be empty.'); }
             $storage = new PDO('sqlite:' . $storage);
@@ -220,10 +228,14 @@ final class MailAutomation
                     return;
                 }
                 if ($isSent) { $this->indexSent($mail, $folder, $report); }
-                if ($baselineSent && !in_array(self::PROCESSED_FLAG, $mail->flags(), true)) {
+                if ($baselineSent) {
+                    if ($this->blockingFlag($mail) !== null) {
+                        $report->skipped++;
+                        continue;
+                    }
                     if (!$dryRun) {
                         try {
-                            $this->client->addFlag($mail, self::PROCESSED_FLAG);
+                            $this->client->addFlag($mail, $this->automationFlags['processed']);
                             $log->debug('Baseline sent message marked processed without automation');
                         } catch (\Throwable $error) {
                             $log->error('Marking baseline sent message failed: {}', [$error->getMessage(), 'exception' => $error]);
@@ -252,8 +264,8 @@ final class MailAutomation
                     $log->error('{:full}', [$messageError->getMessage(), 'exception' => $messageError]);
                     if (!$dryRun) {
                         try {
-                            $this->client->addFlag($mail, self::ERROR_FLAG);
-                            $log->debug('Marked failed message with error flag {}', [self::ERROR_FLAG]);
+                            $this->client->addFlag($mail, $this->automationFlags['error']);
+                            $log->debug('Marked failed message with error flag {}', [$this->automationFlags['error']]);
                         } catch (\Throwable $flagError) {
                             $log->error('Marking failed message with error flag failed: {}', [$flagError->getMessage(), 'exception' => $flagError]);
                         }
@@ -289,9 +301,10 @@ final class MailAutomation
     {
         $messageId = $mail->messageId() ?? $mail->id() ?? 'unknown';
         $messageLog = $this->logger->scope('message')->withContext(['messageId' => $messageId, 'folder' => $folder, 'direction' => $direction]);
-        if (in_array(self::PROCESSED_FLAG, $mail->flags(), true)) {
+        $blockingFlag = $this->blockingFlag($mail);
+        if ($blockingFlag !== null) {
             $report->skipped++;
-            $messageLog->debug('Skip already processed message');
+            $messageLog->debug('Skip message because blocking automation flag {} is set', [$blockingFlag]);
             return;
         }
 
@@ -314,6 +327,7 @@ final class MailAutomation
         $final = $mail;
         $handled = false;
         $reprocess = false;
+        $actionRequired = false;
 
         foreach ($rules as $rule) {
             $context->logger = $messageLog->scope('automation')->withContext(['automationId' => $rule->id]);
@@ -338,7 +352,9 @@ final class MailAutomation
             }
             $handled = true;
             $context->logger->debug('Automation {} matched', [$rule->id]);
-            if (!$actions->isComplete()) {
+            if ($actions->isActionRequired()) {
+                $actionRequired = true;
+            } elseif (!$actions->isComplete()) {
                 [$final,$reprocess] = $this->executeActions($final,$actions,$context->logger->scope('actions'));
             }
             break;
@@ -349,11 +365,23 @@ final class MailAutomation
             $messageLog->debug('Finished message processing without matching automation');
             return;
         }
-        if (!$dryRun && !$reprocess) { $final = $this->client->addFlag($final, self::PROCESSED_FLAG); }
+        if (!$dryRun && $actionRequired) {
+            $final = $this->client->addFlag($final, $this->automationFlags['actionRequired']);
+        } elseif (!$dryRun && !$reprocess) {
+            $final = $this->client->addFlag($final, $this->automationFlags['processed']);
+        }
         if ($reprocess && $final->messageId() !== null) { $this->deferred[$final->messageId()] = true; }
         $this->storage->recordHistory($resolution->contact?->id,$final,$direction,$folder);
         $report->processed++;
-        $messageLog->debug('Finished message processing: handled={}, reprocess={}', [$handled, $reprocess]);
+        $messageLog->debug('Finished message processing: handled={}, reprocess={}, actionRequired={}', [$handled, $reprocess, $actionRequired]);
+    }
+
+    private function blockingFlag(Email $mail): ?string
+    {
+        foreach ($this->automationFlags as $flag) {
+            if (in_array($flag, $mail->flags(), true)) { return $flag; }
+        }
+        return null;
     }
 
     private function executeActions(Email $mail, MailAction $actions, PhoreLogger $logger): array
