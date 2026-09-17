@@ -151,6 +151,49 @@ final class MailAutomationTest extends TestCase
         self::assertContains(MailAutomation::PROCESSED_FLAG, $transport->messages['INBOX'][2]);
     }
 
+    public function testUnmatchedMessageStaysUnprocessedAndFlagChangeRetriesIt(): void
+    {
+        [$automation, $transport] = $this->fixture();
+        $transport->addMessage('INBOX', 4, $this->headers(
+            from: 'customer@example.org',
+            to: 'me@example.org',
+            messageId: 'unmatched@example.org',
+        ));
+
+        $matches = false;
+        $calls = 0;
+        $automation->register(
+            Folder::Inbox,
+            static function (Email $mail, MailContext $context) use (&$matches): bool {
+                return $matches;
+            },
+            static function (Email $mail, MailContext $context) use (&$calls): MailActions {
+                $calls++;
+                return MailActions::complete();
+            },
+            automationId: 'retry-after-flag-change',
+        );
+
+        $first = $automation->run();
+
+        self::assertTrue($first->successful());
+        self::assertSame(0, $first->processed);
+        self::assertSame(1, $first->skipped);
+        self::assertSame(0, $calls);
+        self::assertNotContains(MailAutomation::PROCESSED_FLAG, $transport->messages['INBOX'][4]);
+
+        $matches = true;
+        $transport->select('INBOX', true);
+        $transport->flag(4, '\\Flagged', true);
+
+        $second = $automation->run();
+
+        self::assertTrue($second->successful());
+        self::assertSame(1, $second->processed);
+        self::assertSame(1, $calls);
+        self::assertContains(MailAutomation::PROCESSED_FLAG, $transport->messages['INBOX'][4]);
+    }
+
     public function testPassFallsThroughByPriorityAndDuplicateIdsAreRejected(): void
     {
         [$automation, $transport] = $this->fixture();
