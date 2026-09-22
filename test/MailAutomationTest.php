@@ -305,7 +305,12 @@ final class MailAutomationTest extends TestCase
 
         self::assertTrue($automation->run()->successful());
         self::assertCount(1, $transport->messages['Drafts']);
-        self::assertStringContainsString('Draft answer', reset($transport->rawMessages['Drafts']));
+        $transport->select('Drafts');
+        $draftUid = (int)array_key_first($transport->messages['Drafts']);
+        $draft = (new MailClient($transport, 'test-account', from: 'me@example.org'))->peek(
+            (new \Phore\MailClient\Internal\Reference('test-account', 'Drafts', $transport->validity, $draftUid))->encode(),
+        );
+        self::assertStringStartsWith('Draft answer', $draft->body()->markdown());
     }
 
     public function testSendReplyUsesConfiguredSenderInsteadOfSavingDraft(): void
