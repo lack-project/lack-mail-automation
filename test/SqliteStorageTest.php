@@ -45,6 +45,18 @@ final class SqliteStorageTest extends TestCase
         self::assertSame(['customer_group' => 'b'], $reloaded->tags());
     }
 
+    public function testContactIdContainsReadableEmailSlug(): void
+    {
+        $storage = new SqliteStorage(new PDO('sqlite::memory:'));
+
+        $contact = $storage->contacts()->create('Alias+Sales@XY.DE', 'Alias');
+
+        self::assertMatchesRegularExpression(
+            '/^contact-alias_sales_at_xy_de-[a-f0-9]{8}$/',
+            $contact->id,
+        );
+    }
+
     public function testContactsCanBeIterated(): void
     {
         $storage = new SqliteStorage(new PDO('sqlite::memory:'));

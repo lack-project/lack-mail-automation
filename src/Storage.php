@@ -139,7 +139,9 @@ final class SqliteStorage implements AutomationStorage
     {
         $email = $this->normalizeEmail($email);
         $existing = $this->contactFindByEmail($email); if ($existing !== null) { return $existing; }
-        $id = 'contact-' . substr(hash('sha256', $email), 0, 12);
+        $emailSlug = preg_replace('/[^a-z0-9]+/', '_', str_replace('@', '_at_', $email));
+        $emailSlug = trim((string)$emailSlug, '_');
+        $id = 'contact-' . $emailSlug . '-' . substr(hash('sha256', $email), 0, 8);
         if ($this->contactFindById($id) !== null) { throw new \RuntimeException('Contact ID collision.'); }
         $this->pdo->beginTransaction();
         try {
