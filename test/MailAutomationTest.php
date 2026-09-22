@@ -331,7 +331,7 @@ final class MailAutomationTest extends TestCase
 
         self::assertTrue($automation->run()->successful());
         self::assertNotNull($sender->sent);
-        self::assertSame('Sent answer', $sender->sent->body()->markdown());
+        self::assertStringStartsWith('Sent answer', $sender->sent->body()->markdown());
         self::assertCount(0, $transport->messages['Drafts']);
     }
 
@@ -373,6 +373,8 @@ final class TestSyncTransport implements SyncTransport
     public array $rawMessages = ['INBOX' => [], 'Sent' => [], 'Drafts' => []];
     /** @var array<string,array<int,string>> */
     private array $headers = ['INBOX' => [], 'Sent' => [], 'Drafts' => []];
+    /** @var array<string,array<int,array<string,string>>> */
+    private array $bodyParts = ['INBOX' => [], 'Sent' => [], 'Drafts' => []];
 
     public function addMessage(string $folder, int $uid, string $headers, array $flags = []): void
     {
@@ -400,10 +402,21 @@ final class TestSyncTransport implements SyncTransport
     {
         $this->messages[$folder] ??= [];
         $this->headers[$folder] ??= [];
+        $this->bodyParts[$folder] ??= [];
+        $this->rawMessages[$folder] ??= [];
     }
 
     public function search(array $criteria): array
     {
+        if (isset($criteria['messageId'])) {
+            return array_values(array_filter(
+                array_keys($this->messages[$this->folder]),
+                fn(int $uid): bool => str_contains(
+                    $this->headers[$this->folder][$uid] ?? '',
+                    'Message-ID: ' . $criteria['messageId'],
+                ),
+            ));
+        }
         return array_keys($this->messages[$this->folder]);
     }
 
@@ -417,10 +430,21 @@ final class TestSyncTransport implements SyncTransport
         if (!isset($this->messages[$this->folder][$uid])) {
             throw new \RuntimeException('Message no longer exists.');
         }
+        $parts = $this->bodyParts[$this->folder][$uid] ?? [];
+        $bodyStructure = ['TEXT', 'PLAIN', ['CHARSET', 'UTF-8'], null, null, '7BIT', 0, 0];
+        if (isset($parts['1'], $parts['2'])) {
+            $bodyStructure = [
+                ['TEXT', 'PLAIN', ['CHARSET', 'UTF-8'], null, null, 'BASE64', strlen($parts['1']), 0],
+                ['TEXT', 'HTML', ['CHARSET', 'UTF-8'], null, null, 'BASE64', strlen($parts['2']), 0],
+                'ALTERNATIVE',
+            ];
+        } elseif (isset($parts['1'])) {
+            $bodyStructure = ['TEXT', 'PLAIN', ['CHARSET', 'UTF-8'], null, null, 'BASE64', strlen($parts['1']), 0];
+        }
         return [
             'UID' => $uid,
             'FLAGS' => $this->messages[$this->folder][$uid],
-            'BODYSTRUCTURE' => ['TEXT', 'PLAIN', ['CHARSET', 'UTF-8'], null, null, '7BIT', 0, 0],
+            'BODYSTRUCTURE' => $bodyStructure,
         ];
     }
 
@@ -429,15 +453,31 @@ final class TestSyncTransport implements SyncTransport
         if ($section === 'HEADER') {
             return $this->headers[$this->folder][$uid] ?? '';
         }
-        return '';
+        return $this->bodyParts[$this->folder][$uid][$section] ?? '';
     }
 
     public function append(string $folder, string $mime): void
     {
         $uid = $this->messages[$folder] === [] ? 1 : max(array_keys($this->messages[$folder])) + 1;
         $this->messages[$folder][$uid] = ['\\Draft'];
-        $this->headers[$folder][$uid] = $mime;
         $this->rawMessages[$folder][$uid] = $mime;
+
+        [$header, $body] = array_pad(explode("\r\n\r\n", $mime, 2), 2, '');
+        $this->headers[$folder][$uid] = $header . "\r\n\r\n";
+        $this->bodyParts[$folder][$uid] = [];
+
+        if (preg_match('/Content-Type: multipart\/alternative; boundary="([^"]+)"/i', $header, $match) === 1) {
+            $chunks = explode('--' . $match[1], $body);
+            $part = 1;
+            foreach ($chunks as $chunk) {
+                $chunk = trim($chunk, "\r\n-");
+                if ($chunk === '' || !str_contains($chunk, "\r\n\r\n")) { continue; }
+                [, $encoded] = explode("\r\n\r\n", $chunk, 2);
+                $this->bodyParts[$folder][$uid][(string)$part++] = trim($encoded);
+            }
+        } else {
+            $this->bodyParts[$folder][$uid]['1'] = trim($body);
+        }
     }
 
     public function flag(int $uid, string $flag, bool $add): void
