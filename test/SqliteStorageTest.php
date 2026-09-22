@@ -52,7 +52,7 @@ final class SqliteStorageTest extends TestCase
         $contact = $storage->contacts()->create('Alias+Sales@XY.DE', 'Alias');
 
         self::assertMatchesRegularExpression(
-            '/^contact-alias_sales_at_xy_de-[a-f0-9]{12}$/',
+            '/^contact-alias_sales_at_xy_de-[a-f0-9]{8}$/',
             $contact->id,
         );
     }
