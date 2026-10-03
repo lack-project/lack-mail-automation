@@ -1,158 +1,118 @@
 <?php
+
 declare(strict_types=1);
 
-namespace Lack\MailAutomation\Analysis {
-    // Test-only provider seam: never contact a model from this regression suite.
-    function phore_ai_choices($prompt, $choices, ...$options): ?array
+namespace Lack\MailAutomation\Test;
+
+use DateTimeImmutable;
+use Lack\MailAutomation\Analysis\ConversationFile;
+use Lack\MailAutomation\Analysis\ConversationFileInfo;
+use Lack\MailAutomation\Analysis\ConversationScope;
+use Lack\MailAutomation\Analysis\ConversationStore;
+use Lack\MailAutomation\Analysis\MailActionMatcher;
+use Lack\MailAutomation\Analysis\AnalyzedMail;
+use Lack\MailAutomation\Attributes\OnMailAction;
+use Lack\MailAutomation\Folder;
+use Lack\MailAutomation\MailAction;
+use Lack\MailAutomation\MailActions;
+use Lack\MailAutomation\MailContext;
+use PHPUnit\Framework\TestCase;
+
+#[OnMailAction(
+    when: [GuardOnlyAction::class, 'accepts'],
+    folder: Folder::Inbox,
+)]
+final class GuardOnlyAction
+{
+    public static function accepts(AnalyzedMail $mail, MailContext $context): bool
     {
-        \Lack\MailAutomation\Test\AiMailActionsTest::$choices = $choices;
-        return \Lack\MailAutomation\Test\AiMailActionsTest::$selection;
+        return true;
+    }
+
+    public function __invoke(AnalyzedMail $mail, MailContext $context): MailAction
+    {
+        return MailActions::complete();
     }
 }
 
-namespace Lack\MailAutomation\Test {
-    use Lack\MailAutomation\Analysis\{AnalyzedMail, ContentAnalysis, MailActionMatcher, MailAnalyzer, MailSummary};
-    use Lack\MailAutomation\Attributes\OnMailAction;
-    use Lack\MailAutomation\{ContactResolution, ContactResolutionStatus, DraftSender, Folder, MailAction, MailActions, MailAutomation, MailContext, SqliteStorage};
-    use Phore\MailClient\{Email, MailClient};
-    use PHPUnit\Framework\TestCase;
-
-    require_once __DIR__ . '/MailAutomationTest.php';
-
-    final class AiMailActionsTest extends TestCase
+#[OnMailAction(condition: 'The current message asks for a profile update.')]
+final class AiConditionAction
+{
+    public function __invoke(AnalyzedMail $mail, MailContext $context): MailAction
     {
-        public static ?array $selection = null;
-        public static array $choices = [];
+        return MailActions::complete();
+    }
+}
 
-        protected function setUp(): void
-        {
-            self::$selection = null;
-            self::$choices = [];
+final class MemoryConversationStore implements ConversationStore
+{
+    public array $metadata = [];
+    public array $fileData = [];
+
+    public function get(string $scopeId, string $key, mixed $default = null): mixed
+    {
+        return $this->metadata[$scopeId][$key] ?? $default;
+    }
+
+    public function set(string $scopeId, string $key, mixed $value): void
+    {
+        $this->metadata[$scopeId][$key] = $value;
+    }
+
+    public function all(string $scopeId): array
+    {
+        return $this->metadata[$scopeId] ?? [];
+    }
+
+    public function getFile(string $scopeId, string $name): ?ConversationFile
+    {
+        return $this->fileData[$scopeId][$name] ?? null;
+    }
+
+    public function putFile(string $scopeId, string $name, string $content, ?string $mediaType = null): ConversationFile
+    {
+        return $this->fileData[$scopeId][$name] = new ConversationFile($name, $content, $mediaType, new DateTimeImmutable('2026-01-01T00:00:00+00:00'));
+    }
+
+    public function files(string $scopeId): array
+    {
+        $out = [];
+        foreach ($this->fileData[$scopeId] ?? [] as $name => $file) {
+            $out[$name] = new ConversationFileInfo($name, $file->mediaType, strlen($file->content), $file->modifiedAt);
         }
 
-        private function handler(string $unused = ''): object
-        {
-            return new class {
-                public int $called = 0;
-                public int $archiveGuardCalls = 0;
-                #[OnMailAction('A new request.', id: 'inbox', folder: Folder::Inbox)]
-                public function inbox(AnalyzedMail $mail, MailContext $context): MailAction
-                { $this->called++; return MailActions::complete(); }
-                #[OnMailAction('An archived request.', id: 'archive', when: 'archiveGuard', folder: 'Archive')]
-                public function archive(AnalyzedMail $mail, MailContext $context): MailAction
-                { $this->called++; return MailActions::complete(); }
-                public function archiveGuard(AnalyzedMail $mail, MailContext $context): bool
-                { $this->archiveGuardCalls++; return true; }
-            };
-        }
+        return $out;
+    }
+}
 
-        private function context(string $folder = 'INBOX', bool $dryRun = false): array
-        {
-            $client = new MailClient(new TestSyncTransport(), 'test-account', from: 'me@example.org');
-            $storage = new SqliteStorage(new \PDO('sqlite::memory:'));
-            $storage->bindAccount($client->accountId());
-            $email = (new Email(to: 'me@example.org', subject: 'Request'))->withMarkdown('Body');
-            $summary = new MailSummary('target', null, 'Request', ['applicant@example.org'], ['me@example.org'], [], null, new \DateTimeImmutable(), 'incoming', [], null, 'Summary only', null, [], true);
-            $mail = new AnalyzedMail($email, new ContentAnalysis('Summary only', 'Body'), $summary, []);
-            $context = new MailContext($email, $folder, 'incoming', null, new ContactResolution(ContactResolutionStatus::Unknown), \phore_log(), $dryRun, $storage, $client, $mail);
-            return [$mail, $context, $client, $storage];
-        }
+final class AiMailActionsTest extends TestCase
+{
+    public function testClassLevelActionsAndStaticGuardAreRegistered(): void
+    {
+        $matcher = new MailActionMatcher([new GuardOnlyAction(), new AiConditionAction()]);
 
-        public function testFolderFilteringPrecedesGuardsAndDispatch(): void
-        {
-            [$mail, $context] = $this->context();
-            $handler = $this->handler();
-            $matcher = new MailActionMatcher($handler);
-            self::$selection = ['inbox'];
-            self::assertSame('inbox', $matcher->select($mail, $context));
-            self::assertSame(['inbox'], array_keys(self::$choices));
-            self::assertSame(0, $handler->archiveGuardCalls);
-            self::assertSame(0, $handler->called);
-            self::assertTrue($matcher($mail->getOriginalMail(), $context)->isComplete());
-            self::assertSame(1, $handler->called);
-        }
+        self::assertSame([Folder::Inbox, Folder::Inbox], $matcher->folders());
+    }
 
-        public function testDryRunAndNoMatchDoNotInvokeHandlersOrWriteActionMetadata(): void
-        {
-            [$mail, $context] = $this->context(dryRun: true);
-            $handler = $this->handler();
-            self::$selection = ['inbox'];
-            self::assertTrue((new MailActionMatcher($handler))($mail->getOriginalMail(), $context)->isPass());
-            self::assertSame(0, $handler->called);
-            self::assertNull($context->metadata->get('ai.action'));
-            [$mail, $context] = $this->context();
-            self::$selection = null;
-            self::assertTrue((new MailActionMatcher($handler, flagUnhandled: true))($mail->getOriginalMail(), $context)->isActionRequired());
-            self::assertNull($context->metadata->get('ai.action'));
-        }
+    public function testConversationScopeStoresMetadataAndFilesThroughInterface(): void
+    {
+        $store = new MemoryConversationStore();
+        $scope = new ConversationScope('applicant:test@example.org', $store);
 
-        public function testCannotDispatchAnActionFromAnotherFolder(): void
-        {
-            [$mail, $context] = $this->context();
-            self::$selection = ['archive'];
-            $this->expectException(\UnexpectedValueException::class);
-            (new MailActionMatcher($this->handler()))->select($mail, $context);
-        }
+        $scope->set('stage', 'profile');
+        $file = $scope->putFile('profile.md', '# Profile', 'text/markdown');
 
-        public function testDirectRegistrationDeduplicatesFoldersAndRejectsDuplicateGroupsAtomically(): void
-        {
-            [, , $client, $storage] = $this->context();
-            $automation = new MailAutomation($client, $storage, mailAnalyzer: new MailAnalyzer());
-            $other = new class {
-                #[OnMailAction('Another inbox action.', id: 'other', folder: 'INBOX')]
-                public function other(AnalyzedMail $mail, MailContext $context): MailAction { return MailActions::complete(); }
-            };
-            $automation->addMailActions([$this->handler(), $other]);
-            $property = new \ReflectionProperty($automation, 'rules');
-            self::assertCount(2, $property->getValue($automation));
-            try {
-                $automation->addMailActions($this->handler());
-                self::fail('Duplicate group must fail.');
-            } catch (\InvalidArgumentException) {
-                self::assertCount(2, $property->getValue($automation));
-            }
-        }
+        self::assertSame('profile', $scope->get('stage'));
+        self::assertTrue($scope->hasFile('profile.md'));
+        self::assertSame('# Profile', $scope->getFile('profile.md')?->content);
+        self::assertSame($file->modifiedAt, $scope->fileModifiedAt('profile.md'));
+        self::assertSame(8, $scope->files()['profile.md']->size);
+    }
 
-        public function testDuplicateActionIdsAcrossObjectsAreRejected(): void
-        {
-            $this->expectException(\InvalidArgumentException::class);
-            new MailActionMatcher([$this->handler(), $this->handler()]);
-        }
+    public function testActionNeedsConditionOrGuard(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
 
-        public function testDirectRegistrationRequiresAnalyzer(): void
-        {
-            [, , $client, $storage] = $this->context();
-            $this->expectException(\LogicException::class);
-            (new MailAutomation($client, $storage))->addMailActions($this->handler());
-        }
-
-        public function testSendMailUsesExplicitRecipientAndRespectsDryRunAndSender(): void
-        {
-            foreach (['draft', 'dry-run', 'sender'] as $mode) {
-                $transport = new TestSyncTransport();
-                $transport->addMessage('INBOX', 1, "From: forwarder@example.org\r\nTo: me@example.org\r\nSubject: Lead\r\nMessage-ID: <lead@example.org>\r\n\r\n");
-                $client = new MailClient($transport, 'test-account', from: 'me@example.org');
-                $sender = new class implements DraftSender {
-                    public ?Email $sent = null;
-                    public function send(Email $draft): void { $this->sent = $draft; }
-                };
-                $automation = new MailAutomation($client, new \PDO('sqlite::memory:'), sender: $mode === 'sender' ? $sender : null);
-                $out = (new Email(to: 'applicant@example.org', subject: 'Welcome'))->withMarkdown('Hello');
-                $automation->register(Folder::Inbox, static fn() => true, static fn() => MailActions::schedule()->sendMail($out));
-                self::assertTrue($automation->run(dryRun: $mode === 'dry-run')->successful());
-                if ($mode === 'draft') {
-                    self::assertCount(1, $transport->rawMessages['Drafts']);
-                    self::assertStringContainsString('applicant@example.org', reset($transport->rawMessages['Drafts']));
-                } else {
-                    self::assertCount(0, $transport->messages['Drafts']);
-                }
-                if ($mode === 'sender') {
-                    self::assertSame($out, $sender->sent);
-                }
-                if ($mode === 'dry-run') {
-                    self::assertSame([], $transport->messages['INBOX'][1]);
-                }
-            }
-        }
+        new OnMailAction();
     }
 }

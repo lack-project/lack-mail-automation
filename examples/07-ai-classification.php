@@ -5,63 +5,60 @@ declare(strict_types=1);
 use Lack\MailAutomation\Analysis\AnalyzedMail;
 use Lack\MailAutomation\Analysis\MailAnalyzer;
 use Lack\MailAutomation\Attributes\OnMailAction;
-use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailAutomation;
 use Lack\MailAutomation\MailContext;
-use Phore\MailClient\Attachment;
 use Phore\MailClient\MailboxConfig;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
 
-// php examples/07-ai-classification.php /path/to/test-mailbox.yaml /path/to/demo.sqlite
-// Configure API credentials through phore/ai-harness. Use a separate test account.
-enum DocumentKind: string
+#[OnMailAction(
+    when: [MetaLeadAction::class, 'isForwarder'],
+    condition: 'The current message contains only applicant lead data and this lead has not yet received the initial reply.',
+)]
+final class MetaLeadAction
 {
-    case Document = 'document';
-    case Photo = 'photo';
-}
-
-final class DocumentActions
-{
-    public function oneDocument(AnalyzedMail $mail, MailContext $context): bool
+    public static function isForwarder(AnalyzedMail $mail, MailContext $context): bool
     {
-        return count($mail->getAttachments(DocumentKind::Document)) === 1;
+        return count($mail->from) === 1 && strtolower($mail->from[0]) === 'lead-forwarder@example.org';
     }
 
-    #[OnMailAction(
-        condition: 'The sender explicitly asks for a text version of the attached document, and no later reply already fulfilled this request.',
-        when: 'oneDocument',
-        folder: Folder::Inbox,
-    )]
-    public function provideText(AnalyzedMail $mail, MailContext $context): MailAction
+    public function __invoke(AnalyzedMail $mail, MailContext $context): MailAction
     {
-        $document = $mail->getAttachments(DocumentKind::Document)[0];
-        $text = $document->getContent();       // Full extract, not the summary.
-        $summary = $document->getSummary();   // Cached, no additional AI call.
-        $rawFile = $document->getRawFile();   // Keep the PhoreTempFile alive while in use.
-        $rawBytes = $rawFile->get_contents(); // Exact original bytes.
+        $scope = $mail->scope();
+        $scope->set('lastAction', 'metaLead');
 
-        return $mail->reply('Here is the extracted text. Please verify it against the original document.', [
-            Attachment::fromBytes('document.txt', 'text/plain', $text),
-        ]);
+        return $mail->reply('Thanks, we received your application data.');
     }
 }
 
-$client = MailboxConfig::fromFile($argv[1] ?? throw new InvalidArgumentException('Pass a test mailbox YAML path.'))->connect();
+#[OnMailAction(
+    condition: 'The applicant explicitly asks to create or change the profile and this request is still open in the conversation.',
+)]
+final class ProfileAction
+{
+    public function __invoke(AnalyzedMail $mail, MailContext $context): MailAction
+    {
+        $scope = $mail->scopeFor('recipient:' . strtolower($mail->from[0]));
+        $previous = $scope->getFile('profile.md');
+        $profile = $previous?->content ?? '# New profile';
+
+        $scope->putFile('profile.md', $profile, 'text/markdown');
+
+        return $mail->reply('Your profile draft is ready.');
+    }
+}
+
+$client = MailboxConfig::fromFile($argv[1])->connect();
 $automation = new MailAutomation(
     client: $client,
-    storage: $argv[2] ?? throw new InvalidArgumentException('Pass a separate demo SQLite path.'),
-    mailAnalyzer: new MailAnalyzer(
-        mailClasses: ['text_request' => 'Request for an attachment as text', 'other' => 'Other correspondence'],
-        attachmentClasses: DocumentKind::class,
-    ),
+    storage: $argv[2],
+    mailAnalyzer: new MailAnalyzer(),
 );
-// No OnFolderAutomation adapter or manual forwarding method is necessary.
-// Pass [new LeadActions(), new ProfileActions()] to share choices across classes.
-$automation->addMailActions(new DocumentActions());
 
-// Preview selects only: no business handler, scheduled action, draft or send.
-// run(dryRun: false) saves replies as drafts unless an explicit DraftSender is supplied.
-$report = $automation->run(dryRun: true);
-$automation->logger()->result('Preview finished: skipped={}, errors={}', [$report->skipped, count($report->errors())]);
+$automation->addMailActions([
+    new MetaLeadAction(),
+    new ProfileAction(),
+]);
+
+$automation->run();
