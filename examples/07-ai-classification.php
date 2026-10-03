@@ -26,7 +26,7 @@ final class MetaLeadAction
 
     public function __invoke(AnalyzedMail $mail, MailContext $context): MailAction
     {
-        return $mail->createResponseMail(
+        return $mail->ai_answer(
             new PromptFile(__DIR__ . '/prompts/07-initial-reply.md'),
         );
     }
@@ -42,7 +42,7 @@ final class ProfileAction
         $scope = $mail->scopeFor('recipient:' . strtolower($mail->from[0]));
         $scope->putFile('profile.md', '# Profile', 'text/markdown');
 
-        return $mail->createResponseMail(
+        return $mail->ai_answer(
             new PromptFile(__DIR__ . '/prompts/07-profile-reply.md'),
         );
     }

@@ -104,7 +104,7 @@ For AI calls, prefer the schema-backed helpers instead of rebuilding
 $mailPrompt = $mail->prompt(alias: 'incomingEmail');
 $conversation = $mail->conversationPrompt();
 
-return $mail->createResponseMail(
+return $mail->ai_answer(
     new PromptFile(__DIR__ . '/_prompt/answer.md'),
     $aiOptions,
 );
@@ -112,7 +112,7 @@ return $mail->createResponseMail(
 
 `prompt()` and `conversationPrompt()` return native AI Harness `StructPrompt`
 instances whose JSON schema is generated from LACK-owned prompt DTOs. Mail data
-remains untrusted by default. `createResponseMail()` appends the complete
+remains untrusted by default. `ai_answer()` appends the complete
 conversation automatically and returns `actionRequired()` when the generated
 structured result reports insufficient or contradictory context.
 
