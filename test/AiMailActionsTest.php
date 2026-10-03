@@ -71,14 +71,24 @@ final class MemoryConversationStore implements ConversationStore
 
     public function putFile(string $scopeId, string $name, string $content, ?string $mediaType = null): ConversationFile
     {
-        return $this->fileData[$scopeId][$name] = new ConversationFile($name, $content, $mediaType, new DateTimeImmutable('2026-01-01T00:00:00+00:00'));
+        return $this->fileData[$scopeId][$name] = new ConversationFile(
+            $name,
+            $content,
+            $mediaType,
+            new DateTimeImmutable('2026-01-01T00:00:00+00:00'),
+        );
     }
 
     public function files(string $scopeId): array
     {
         $out = [];
         foreach ($this->fileData[$scopeId] ?? [] as $name => $file) {
-            $out[$name] = new ConversationFileInfo($name, $file->mediaType, strlen($file->content), $file->modifiedAt);
+            $out[$name] = new ConversationFileInfo(
+                $name,
+                $file->mediaType,
+                strlen($file->content),
+                $file->modifiedAt,
+            );
         }
 
         return $out;
@@ -106,7 +116,7 @@ final class AiMailActionsTest extends TestCase
         self::assertTrue($scope->hasFile('profile.md'));
         self::assertSame('# Profile', $scope->getFile('profile.md')?->content);
         self::assertSame($file->modifiedAt, $scope->fileModifiedAt('profile.md'));
-        self::assertSame(8, $scope->files()['profile.md']->size);
+        self::assertSame(9, $scope->files()['profile.md']->size);
     }
 
     public function testActionNeedsConditionOrGuard(): void
