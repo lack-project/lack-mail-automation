@@ -2,6 +2,126 @@
 
 Stateful mail automation for PHP 8.5 on top of `phore/mail-client`. This package owns durable automation state, rules, contact identity, application metadata and processing semantics. The mail client remains the stateless IMAP boundary.
 
+## Content-driven analysis and action matching
+
+For new workflows, start with
+[`examples/07-ai-classification.php`](examples/07-ai-classification.php).
+Existing folder rules, contact tags and processing flags remain supported;
+semantic business decisions no longer need to inspect them.
+
+Configure `MailAutomation(..., mailAnalyzer: new MailAnalyzer(...))`, then
+register a `MailActionMatcher` through `addRules()`, either directly (its
+invokable method carries `OnFolderAutomation(Inbox)`) or through your own
+attributed folder adapter. The matcher inspects public application methods:
+
+```php
+#[OnMailAction('The sender explicitly requests an update to the existing profile.', when: 'hasProfile')]
+public function changeProfile(AnalyzedMail $mail, MailContext $context): MailAction
+{
+    return $mail->reply('Your proposed profile changes are attached.', [$attachment]);
+}
+```
+
+`when` names an application method `(AnalyzedMail, MailContext): bool`. It
+runs before selection and excludes ineligible choices using actual application
+facts, not inferred flags. The AI selects **at most one registered ID** through
+`phore_ai_choices()`. It never executes tools or arbitrary method names. Rules
+should be mutually exclusive; no match or uncertainty returns `pass()` by
+default, or `actionRequired()` with `flagUnhandled: true`.
+
+### One immutable mail value
+
+`MailContext::$analysis` and selected handlers receive the same `AnalyzedMail`.
+Its subject, sender/recipient arrays, date, IDs, analysis and attachments are
+immutable snapshots. `getContent()` returns the decoded original body text;
+`getRawContent()` returns original decoded HTML when present, otherwise text.
+It is **not an RFC822/MIME dump**, and returned HTML is not safe to render.
+`getOriginalMail()` exposes the underlying immutable mail-client value.
+
+`getAttachments()` returns `AnalyzedAttachment[]`; optionally filter by a
+classification string or a string-backed enum case. `getAttachment($id)` uses
+a stable per-message ID, so duplicate filenames stay distinct. Each attachment
+exposes `getSummary()`, full extracted `getContent()`, decoded binary
+`getRawContent()`, and `getRawFile()`. The latter materializes a temporary copy
+using `phore/filesystem`; retain the returned object while using its path.
+
+`reply($markdown, $attachments)` returns a schedule and does not send anything.
+Attachments can be analyzed originals or mail-client `Attachment::fromBytes()`
+values. `ScheduledMailActions::sendReply()` accepts the latter directly.
+Replies still become drafts by default. An explicit `DraftSender` enables
+sending; after successful sending, automatic Answered marking is honored.
+The existing processed/error/actionRequired flags remain engine-owned.
+
+### Extraction, persistence and conversation boundaries
+
+`MailAnalyzer` accepts independent classification lists, ID-to-description maps
+or string-backed enum class names for mail and attachments. Results use the
+configured string IDs or `null`, never an invented category. PDFs and supported
+images (PNG/JPEG/WebP/GIF) go to `FilePrompt`/`ImagePrompt`; UTF-8 text is retained
+exactly. `phore_ai_struct()` provides a summary and full document transcription.
+PDF/image extraction is model-generated and **not guaranteed lossless**; check
+against the retained original for exact copying. The model reports unreadable
+or incomplete input through `complete=false` and `issue`. Unsupported formats
+remain visible as incomplete, rather than disappearing.
+
+Default limits are 10 MB decoded per attachment, 20 MB total attachments,
+1 MB body/extracted text and 12 KB per summary. Byte/transport/provider failures
+throw; they are not treated as empty successful analyses. Partial documents,
+missing referenced messages and oversized routing context prevent automatic
+selection. Limits are configurable where exposed by the constructors.
+
+Analyses are cached by content, vocabulary, model/reasoning and explicit
+analysis `version`, separately from the compact conversation index, using the
+existing `AutomationStorage` metadata API. Raw binaries are not duplicated in
+SQLite: they remain on the mail server and in the current return value. The
+cache does contain personal full text; apply access control, retention and
+backup policies to the database. Changing custom client configuration requires
+bumping `version`; historical messages need reanalysis for a new version.
+
+The engine analyzes observed incoming messages and Sent messages, including the
+first Sent baseline and already-processed messages. Error/actionRequired gates
+still prevent retries until deliberately cleared. The thread index follows
+`Message-ID`, `In-Reply-To` and `References`, with identical external participant
+sets; it never joins messages by subject or loads every contact's mail into a
+prompt. Missing references stay explicit. Header links and From addresses are
+not authentication; sensitive actions still require application authorization.
+
+`getHistory()` is chronological (oldest first), excludes the current message,
+and contains compact `MailSummary` values, unlike the legacy newest-first
+contact history. `routingContext()` includes the target message ID and dated
+sender/recipient information, mail summaries and attachment summaries only.
+Neither full extracted documents nor raw files enter the matcher's fresh AI
+context. A selected action can explicitly call
+`loadPrevious($mail->getHistory()[0]->id)` for a previous full mail and its
+attachments. The ID must belong to this conversation; the original mail must
+still be available at its stored server reference. Cached analysis is reused,
+but this performs a server read and may call AI again if a cache entry is gone.
+Moved/deleted historical originals are reported as errors, not substituted. By default it abstains beyond 100 KB rather than silently truncating.
+
+Only **observed/indexed** history is available. Enabling analysis on a database
+with existing sync cursors does not automatically backfill old unchanged mail.
+For evaluation, use an isolated test mailbox/state, or explicitly replay old
+messages through `MailAnalyzer::analyze()` without resetting productive cursors.
+A missing reference causes review/no-match until the history is available.
+Legacy `$context->thread` is unchanged; use `$context->analysis->getHistory()`.
+
+### Preview and retry semantics
+
+`MailActionMatcher::select()` returns a proposed ID without invoking a handler.
+During `run(dryRun: true)`, the analyzer uses non-persisted previews and the
+matcher never invokes selected business methods. The engine also suppresses
+scheduled IMAP changes, drafts and sending in dry-run. Legacy handlers and
+contact/Sent bookkeeping can still perform their existing storage operations;
+use separate/in-memory state for a fully isolated demo. AI calls still cost
+money, and MailClient configuration may provision managed folders on connect.
+
+No match does not mark a message processed, but the existing folder cursor still
+advances; a later rule change alone does not trigger another evaluation. The
+selected ID is recorded as `ai.action` metadata on a normal run, not as proof of
+execution. Serialization, technical flags and application idempotency remain
+necessary: a send followed by a failed flag write is not an exactly-once
+transaction. No productive state machine, tags or existing examples are removed.
+
 ## Boundary
 
 `phore/mail-client` supplies mailbox primitives: folder synchronization, configured standard and managed folders, account/sender identity, side-effect-free reads, flags, drafts and verified same-account moves. `lack/mail-automation` consumes those APIs and adds SQLite-backed cursors, Sent evidence, contacts and aliases, metadata, tags, rule execution and the `phore_processed` processing gate. No IMAP transport implementation is duplicated here.

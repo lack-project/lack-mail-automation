@@ -107,8 +107,26 @@ final class ScheduledMailActions implements MailAction
     public function moveToRaw(string $folder, bool $reprocess = false): self
     { return $this->queue('moveToRaw', [$folder,$reprocess]); }
 
-    public function sendReply(string $markdown): self
-    { return $this->queue('sendReply', [$markdown]); }
+    /**
+     * Schedule a reply, optionally containing original or generated attachments.
+     * No I/O occurs here. MailAutomation saves a draft by default, or passes it
+     * to an explicitly configured DraftSender; dry-run executes neither.
+     *
+     * @param list<\Phore\MailClient\Attachment> $attachments Immutable reply attachments.
+     * @throws \InvalidArgumentException For values that are not Attachment objects.
+     * @example return MailActions::schedule()->sendReply('Revised CV attached.', [$cv]);
+     * @see \Lack\MailAutomation\Analysis\AnalyzedMail::reply()
+     */
+    public function sendReply(string $markdown, array $attachments = []): self
+    {
+        foreach ($attachments as $attachment) {
+            if (!$attachment instanceof \Phore\MailClient\Attachment) {
+                throw new \InvalidArgumentException('Reply attachments must be Attachment objects.');
+            }
+        }
+        // Preserve the existing schedule representation for replies without files.
+        return $this->queue('sendReply', $attachments === [] ? [$markdown] : [$markdown, array_values($attachments)]);
+    }
 }
 
 final class RunError

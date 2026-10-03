@@ -65,6 +65,7 @@ final class MailAutomation
         ?ContactResolver $contactResolver = null,
         private ?DraftSender $sender = null,
         ?PhoreLogger $logger = null,
+        private ?Analysis\MailAnalyzer $mailAnalyzer = null,
     ) {
         $this->logger = ($logger ?? PhoreLogger::GetInstance())->scope('mailAutomation');
         $this->automationFlags = array_replace(self::DEFAULT_AUTOMATION_FLAGS, $client->automationFlags());
@@ -225,28 +226,36 @@ final class MailAutomation
                     $log->debug('Stop folder sync for deferred message {}', [$mail->messageId()]);
                     return;
                 }
-                if ($isSent) { $this->indexSent($mail, $folder, $report); }
-                if ($baselineSent) {
-                    if ($this->blockingFlag($mail) !== null) {
+                $direction = $isSent ? 'outgoing' : 'incoming';
+                try {
+                    if ($isSent) { $this->indexSent($mail, $folder, $report); }
+                    // Fehler/manuelle Sperren verhindern auch wiederholte AI-Aufrufe.
+                    if (in_array($this->automationFlags['error'], $mail->flags(), true)
+                        || in_array($this->automationFlags['actionRequired'], $mail->flags(), true)) {
                         $report->skipped++;
                         continue;
                     }
-                    if (!$dryRun) {
-                        try {
-                            $this->client->addFlag($mail, $this->automationFlags['processed']);
-                            $log->debug('Baseline sent message marked processed without automation');
-                        } catch (\Throwable $error) {
-                            $log->error('Marking baseline sent message failed: {}', [$error->getMessage(), 'exception' => $error]);
-                            $report->addError($folder,$mail->messageId(),$error);
-                            return;
+                    // Auch Sent-Baseline und schon bearbeitete Mails liefern Verlaufskontext.
+                    $analysis = $this->mailAnalyzer?->analyze($mail, $this->client, $this->storage, $direction, persist: !$dryRun);
+                    if ($baselineSent) {
+                        if ($this->blockingFlag($mail) !== null) {
+                            $report->skipped++;
+                            continue;
                         }
+                        if (!$dryRun) {
+                            try {
+                                $this->client->addFlag($mail, $this->automationFlags['processed']);
+                                $log->debug('Baseline sent message marked processed without automation');
+                            } catch (\Throwable $error) {
+                                $log->error('Marking baseline sent message failed: {}', [$error->getMessage(), 'exception' => $error]);
+                                $report->addError($folder,$mail->messageId(),$error);
+                                return;
+                            }
+                        }
+                        $report->skipped++;
+                        continue;
                     }
-                    $report->skipped++;
-                    continue;
-                }
-                $direction = $isSent ? 'outgoing' : 'incoming';
-                try {
-                    $this->processMessage($mail, $folder, $direction, $dryRun, $report);
+                    $this->processMessage($mail, $folder, $direction, $dryRun, $report, $analysis);
                 } catch (\Throwable $error) {
                     $senders = array_map(static fn($address): string => $address->getAddress(), $mail->from());
                     $messageError = new \RuntimeException(sprintf(
@@ -295,7 +304,7 @@ final class MailAutomation
         }
     }
 
-    private function processMessage(Email $mail, string $folder, string $direction, bool $dryRun, RunReport $report): void
+    private function processMessage(Email $mail, string $folder, string $direction, bool $dryRun, RunReport $report, ?Analysis\AnalyzedMail $analysis = null): void
     {
         $messageId = $mail->messageId() ?? $mail->id() ?? 'unknown';
         $messageLog = $this->logger->scope('message')->withContext(['messageId' => $messageId, 'folder' => $folder, 'direction' => $direction]);
@@ -320,7 +329,7 @@ final class MailAutomation
         }
         $messageLog->debug('Contact resolution status {}', [$resolution->status->value]);
 
-        $context = new MailContext($mail,$folder,$direction,$resolution->contact,$resolution,$messageLog,$dryRun,$this->storage,$this->client);
+        $context = new MailContext($mail,$folder,$direction,$resolution->contact,$resolution,$messageLog,$dryRun,$this->storage,$this->client,$analysis);
         $rules = $this->rulesFor($folder);
         $final = $mail;
         $handled = false;
@@ -352,7 +361,7 @@ final class MailAutomation
             $context->logger->debug('Automation {} matched', [$rule->id]);
             if ($actions->isActionRequired()) {
                 $actionRequired = true;
-            } elseif (!$actions->isComplete()) {
+            } elseif (!$dryRun && !$actions->isComplete()) {
                 [$final,$reprocess] = $this->executeActions($final,$actions,$context->logger->scope('actions'));
             }
             break;
@@ -397,10 +406,16 @@ final class MailAutomation
                     break;
                 case 'sendReply':
                     $reply = $this->client->reply($current,$item['args'][0]);
+                    foreach ($item['args'][1] ?? [] as $attachment) {
+                        $reply = $reply->attach($attachment);
+                    }
                     if ($this->sender === null) {
                         $this->client->saveDraft($reply);
                     } else {
                         $this->sender->send($reply);
+                        if ($this->client->isAutomatic('answered')) {
+                            $current = $this->client->markAnswered($current);
+                        }
                     }
                     break;
                 case 'moveTo':
