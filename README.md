@@ -97,6 +97,25 @@ the same SQLite database. A custom `ConversationStore` can be passed to
 contains the full observed decoded mail body. `routingContext()` combines that
 history with attachment summaries and the scope snapshot.
 
+For AI calls, prefer the schema-backed helpers instead of rebuilding
+`StructPrompt` arrays manually:
+
+```php
+$mailPrompt = $mail->prompt(alias: 'incomingEmail');
+$conversation = $mail->conversationPrompt();
+
+return $mail->createResponseMail(
+    new PromptFile(__DIR__ . '/_prompt/answer.md'),
+    $aiOptions,
+);
+```
+
+`prompt()` and `conversationPrompt()` return native AI Harness `StructPrompt`
+instances whose JSON schema is generated from LACK-owned prompt DTOs. Mail data
+remains untrusted by default. `createResponseMail()` appends the complete
+conversation automatically and returns `actionRequired()` when the generated
+structured result reports insufficient or contradictory context.
+
 Attachments are analyzed but not classified. `getAttachments()` returns all
 attachments; each exposes filename, media type, summary, extracted content,
 original bytes and `getRawFile()`. A selected action can decide which document
