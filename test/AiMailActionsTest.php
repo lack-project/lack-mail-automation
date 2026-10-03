@@ -18,6 +18,7 @@ use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailContext;
+use Phore\AiHarness\AiContext;
 use Phore\MailClient\Email;
 use PHPUnit\Framework\TestCase;
 
