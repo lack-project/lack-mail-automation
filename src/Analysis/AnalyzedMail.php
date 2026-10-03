@@ -7,9 +7,14 @@ namespace Lack\MailAutomation\Analysis;
 use DateTimeImmutable;
 use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
+use Lack\MailAutomation\Prompt\ConversationPrompt;
+use Lack\MailAutomation\Prompt\MailPrompt;
+use Phore\AiHarness\PromptType\PromptType;
+use Phore\AiHarness\PromptType\StructPrompt;
 use Phore\FileSystem\PhoreTempFile;
 use Phore\MailClient\Attachment;
 use Phore\MailClient\Email;
+use UnexpectedValueException;
 
 final readonly class ContentAnalysis
 {
@@ -44,6 +49,16 @@ final readonly class ExtractedContent
         public string $summary,
         public bool $complete,
         public ?string $issue,
+    ) {
+    }
+}
+
+final readonly class ResponseMailDraft
+{
+    public function __construct(
+        public bool $answerable,
+        public string $markdown,
+        public string $reason,
     ) {
     }
 }
@@ -243,10 +258,95 @@ final readonly class AnalyzedMail
     }
 
     /**
-     * Return the complete analyzed mail conversation plus scope state.
+     * Create a native schema-backed AI Harness prompt for this mail.
      *
-     * Mail bodies are complete decoded text. Attachments contribute summaries;
-     * full attachment text/bytes remain available to the selected action.
+     * Mail content remains external/untrusted data by default. The returned
+     * StructPrompt can be passed directly to phore_ai_text(), phore_ai_struct()
+     * and the other phore/ai-harness helpers without manually copying fields.
+     *
+     * @param ?string $alias Prompt reference alias.
+     * @param ?string $instructions Optional application guidance for this source.
+     * @param bool $allowInstructions Whether instructions contained in the mail itself may influence the model.
+     * @return StructPrompt Schema-backed prompt containing the current mail.
+     * @example $draft = phore_ai_struct([$promptFile, $mail->prompt('incomingEmail')], Draft::class);
+     * @see MailPrompt::from()
+     */
+    public function prompt(
+        ?string $alias = 'mail',
+        ?string $instructions = null,
+        bool $allowInstructions = false,
+    ): StructPrompt {
+        return MailPrompt::from($this, $alias, $instructions, $allowInstructions);
+    }
+
+    /**
+     * Create a native schema-backed prompt for the full observed conversation.
+     *
+     * The prompt contains chronological full mail bodies, attachment summaries,
+     * missing-reference information and the conversation-scope inventory.
+     *
+     * @param ?string $alias Prompt reference alias.
+     * @param ?string $instructions Optional application guidance for this source.
+     * @param bool $allowInstructions Whether instructions embedded in mail data may influence the model.
+     * @return StructPrompt Schema-backed prompt for the complete conversation.
+     * @example $answer = phore_ai_text([$promptFile, $mail->conversationPrompt()]);
+     * @see ConversationPrompt::from()
+     */
+    public function conversationPrompt(
+        ?string $alias = 'conversation',
+        ?string $instructions = null,
+        bool $allowInstructions = false,
+    ): StructPrompt {
+        return ConversationPrompt::from($this, $alias, $instructions, $allowInstructions);
+    }
+
+    /**
+     * Generate and schedule a reply directly from an application prompt.
+     *
+     * The full conversation prompt is appended automatically. The structured
+     * result can explicitly decline when the supplied context is insufficient.
+     * Long reply instructions should normally live in a PromptFile. The optional
+     * attachment callback runs only after a usable draft was generated.
+     *
+     * @param string|PromptType|array<int,string|PromptType> $prompt Application prompt or prompt list.
+     * @param array<string,mixed> $options phore/ai-harness request options.
+     * @param null|callable(ResponseMailDraft, self): array<Attachment|AnalyzedAttachment> $attachments Attachment factory.
+     * @return MailAction Scheduled reply or actionRequired when the model cannot answer safely.
+     * @throws UnexpectedValueException If the attachment callback does not return an array.
+     * @example return $mail->createResponseMail(new PromptFile(__DIR__ . '/reply.md'), $aiOptions);
+     * @see conversationPrompt()
+     */
+    public function createResponseMail(
+        string|PromptType|array $prompt,
+        array $options = [],
+        ?callable $attachments = null,
+    ): MailAction {
+        $prompts = is_array($prompt) ? array_values($prompt) : [$prompt];
+        $prompts[] = $this->conversationPrompt();
+        $prompts[] = 'Return answerable=false when the supplied conversation is insufficient or contradictory. '
+            . 'When answerable=true, markdown must contain only the complete send-ready reply body. '
+            . 'Use reason for a short explanation when answerable=false.';
+
+        /** @var ResponseMailDraft $draft */
+        $draft = phore_ai_struct($prompts, ResponseMailDraft::class, $options);
+
+        if (!$draft->answerable || trim($draft->markdown) === '') {
+            return MailActions::actionRequired();
+        }
+
+        $files = $attachments === null ? [] : $attachments($draft, $this);
+        if (!is_array($files)) {
+            throw new UnexpectedValueException('Response mail attachment callback must return an array.');
+        }
+
+        return $this->reply($draft->markdown, $files);
+    }
+
+    /**
+     * Return legacy array context for compatibility.
+     *
+     * Prefer conversationPrompt() for AI requests so schema and source policy are
+     * applied centrally instead of reconstructing StructPrompt values in consumers.
      */
     public function routingContext(): array
     {

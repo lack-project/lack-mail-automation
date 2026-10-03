@@ -11,11 +11,14 @@ use Lack\MailAutomation\Analysis\ConversationScope;
 use Lack\MailAutomation\Analysis\ConversationStore;
 use Lack\MailAutomation\Analysis\MailActionMatcher;
 use Lack\MailAutomation\Analysis\AnalyzedMail;
+use Lack\MailAutomation\Analysis\ContentAnalysis;
+use Lack\MailAutomation\Analysis\MailSummary;
 use Lack\MailAutomation\Attributes\OnMailAction;
 use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailContext;
+use Phore\MailClient\Email;
 use PHPUnit\Framework\TestCase;
 
 #[OnMailAction(
@@ -119,10 +122,80 @@ final class AiMailActionsTest extends TestCase
         self::assertSame(9, $scope->files()['profile.md']->size);
     }
 
+    public function testMailAndConversationPromptsExposeSchemaAndData(): void
+    {
+        $current = $this->analyzedMail();
+
+        $mailPrompt = $current->prompt('incomingEmail');
+        self::assertSame('incomingEmail', $mailPrompt->alias());
+        self::assertSame('object', $mailPrompt->jsonSchema()['type']);
+        self::assertSame('Need help', $mailPrompt->data()['subject']);
+        self::assertSame('Current body', $mailPrompt->data()['content']);
+
+        $conversation = $current->conversationPrompt();
+        self::assertSame('conversation', $conversation->alias());
+        self::assertSame('object', $conversation->jsonSchema()['type']);
+        self::assertCount(2, $conversation->data()['messages']);
+        self::assertSame('Previous body', $conversation->data()['messages'][0]['content']);
+        self::assertSame('Current body', $conversation->data()['messages'][1]['content']);
+    }
+
     public function testActionNeedsConditionOrGuard(): void
     {
         $this->expectException(\InvalidArgumentException::class);
 
         new OnMailAction();
+    }
+
+    private function analyzedMail(): AnalyzedMail
+    {
+        $store = new MemoryConversationStore();
+        $scope = new ConversationScope('thread-1', $store);
+        $previous = new MailSummary(
+            id: 'previous',
+            messageId: '<previous@example.org>',
+            subject: 'Need help',
+            from: ['me@example.org'],
+            to: ['user@example.org'],
+            cc: [],
+            date: new DateTimeImmutable('2026-01-01T09:00:00+00:00'),
+            observedAt: new DateTimeImmutable('2026-01-01T09:00:00+00:00'),
+            direction: 'outgoing',
+            references: [],
+            inReplyTo: null,
+            content: 'Previous body',
+            summary: 'Previous message',
+            attachments: [],
+            complete: true,
+        );
+        $current = new MailSummary(
+            id: 'current',
+            messageId: '<current@example.org>',
+            subject: 'Need help',
+            from: ['user@example.org'],
+            to: ['me@example.org'],
+            cc: [],
+            date: new DateTimeImmutable('2026-01-01T10:00:00+00:00'),
+            observedAt: new DateTimeImmutable('2026-01-01T10:00:00+00:00'),
+            direction: 'incoming',
+            references: ['<previous@example.org>'],
+            inReplyTo: '<previous@example.org>',
+            content: 'Current body',
+            summary: 'Current message',
+            attachments: [],
+            complete: true,
+        );
+
+        return new AnalyzedMail(
+            original: (new Email(from: 'user@example.org', to: 'me@example.org', subject: 'Need help'))
+                ->withMarkdown('Current body'),
+            analysis: new ContentAnalysis('Current message', 'Current body'),
+            metadata: $current,
+            attachments: [],
+            history: [$previous],
+            missingReferences: [],
+            conversation: $scope,
+            scopeStore: $store,
+        );
     }
 }

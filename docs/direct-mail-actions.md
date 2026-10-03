@@ -119,3 +119,43 @@ selected.
 
 Technical processing flags (`processed`, `error`, `actionRequired`) remain
 engine mechanics. They are not semantic conversation state.
+
+
+## Schema-backed mail prompts
+
+Consumers should not rebuild mail arrays with `StructPrompt`. LACK exposes
+schema-backed factories that return native AI Harness `StructPrompt` objects:
+
+```php
+$mailPrompt = $mail->prompt(alias: 'incomingEmail');
+$conversationPrompt = $mail->conversationPrompt(alias: 'conversation');
+
+$result = phore_ai_struct([
+    new PromptFile(__DIR__ . '/_prompt/action.md'),
+    $conversationPrompt,
+], Result::class, $aiOptions);
+```
+
+The schema is generated from LACK's internal prompt DTOs through the normal
+`phore/schema` integration used by `StructPrompt`. Mail and conversation
+content remain untrusted by default. `allowInstructions: true` must be an
+explicit application decision.
+
+For reusable long-form reply generation, use an external Markdown prompt and
+`createResponseMail()`:
+
+```php
+return $mail->createResponseMail(
+    new PromptFile(__DIR__ . '/_prompt/answer-question.md'),
+    $aiOptions,
+);
+```
+
+The method appends the complete `conversation` prompt automatically and
+returns either a scheduled reply or `actionRequired()` when the model reports
+that the available context is insufficient. An optional callback can create
+reply attachments after a usable draft was generated.
+
+Short one-line tasks such as a simple classification may stay inline. Prompts
+for composing mails, profiles, CV revisions or other growing business content
+should live in dedicated Markdown files next to the action that owns them.

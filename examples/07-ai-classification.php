@@ -8,6 +8,7 @@ use Lack\MailAutomation\Attributes\OnMailAction;
 use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailAutomation;
 use Lack\MailAutomation\MailContext;
+use Phore\AiHarness\PromptType\PromptFile;
 use Phore\MailClient\MailboxConfig;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
@@ -25,10 +26,9 @@ final class MetaLeadAction
 
     public function __invoke(AnalyzedMail $mail, MailContext $context): MailAction
     {
-        $scope = $mail->scope();
-        $scope->set('lastAction', 'metaLead');
-
-        return $mail->reply('Thanks, we received your application data.');
+        return $mail->createResponseMail(
+            new PromptFile(__DIR__ . '/prompts/07-initial-reply.md'),
+        );
     }
 }
 
@@ -40,12 +40,11 @@ final class ProfileAction
     public function __invoke(AnalyzedMail $mail, MailContext $context): MailAction
     {
         $scope = $mail->scopeFor('recipient:' . strtolower($mail->from[0]));
-        $previous = $scope->getFile('profile.md');
-        $profile = $previous?->content ?? '# New profile';
+        $scope->putFile('profile.md', '# Profile', 'text/markdown');
 
-        $scope->putFile('profile.md', $profile, 'text/markdown');
-
-        return $mail->reply('Your profile draft is ready.');
+        return $mail->createResponseMail(
+            new PromptFile(__DIR__ . '/prompts/07-profile-reply.md'),
+        );
     }
 }
 

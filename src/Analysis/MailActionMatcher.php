@@ -12,7 +12,6 @@ use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailContext;
 use Phore\AiHarness\AiContext;
-use Phore\AiHarness\PromptType\StructPrompt;
 use Phore\MailClient\Email;
 use ReflectionMethod;
 use ReflectionObject;
@@ -122,8 +121,8 @@ final class MailActionMatcher
             }
         }
 
-        $data = $mail->routingContext();
-        if (strlen(json_encode($data, JSON_THROW_ON_ERROR)) > $this->maxContextBytes) {
+        $prompt = $mail->conversationPrompt();
+        if (strlen(json_encode($prompt->data(), JSON_THROW_ON_ERROR)) > $this->maxContextBytes) {
             return null;
         }
 
@@ -165,7 +164,7 @@ final class MailActionMatcher
             return null;
         }
 
-        $ai = new AiContext(prompts: [new StructPrompt($data, alias: 'conversation')], options: $this->aiOptions);
+        $ai = new AiContext(prompts: [$prompt], options: $this->aiOptions);
         $selection = phore_ai_choices(
             'Choose the single next action for the current target message. '
             . 'Use the COMPLETE chronological mail body history plus attachment summaries and scope metadata/file inventory. '
