@@ -3,22 +3,19 @@
 declare(strict_types=1);
 
 use Lack\MailAutomation\Analysis\AnalyzedMail;
-use Lack\MailAutomation\Analysis\MailActionMatcher;
 use Lack\MailAutomation\Analysis\MailAnalyzer;
-use Lack\MailAutomation\Attributes\OnFolderAutomation;
 use Lack\MailAutomation\Attributes\OnMailAction;
 use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailAutomation;
 use Lack\MailAutomation\MailContext;
 use Phore\MailClient\Attachment;
-use Phore\MailClient\Email;
 use Phore\MailClient\MailboxConfig;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
 
 // php examples/07-ai-classification.php /path/to/test-mailbox.yaml /path/to/demo.sqlite
-// The API credentials are configured through phore/ai-harness, not this example.
+// Configure API credentials through phore/ai-harness. Use a separate test account.
 enum DocumentKind: string
 {
     case Document = 'document';
@@ -32,32 +29,22 @@ final class DocumentActions
         return count($mail->getAttachments(DocumentKind::Document)) === 1;
     }
 
-    #[OnMailAction('The sender explicitly asks for a text version of the attached document, and no later reply already fulfilled this request.', when: 'oneDocument')]
+    #[OnMailAction(
+        condition: 'The sender explicitly asks for a text version of the attached document, and no later reply already fulfilled this request.',
+        when: 'oneDocument',
+        folder: Folder::Inbox,
+    )]
     public function provideText(AnalyzedMail $mail, MailContext $context): MailAction
     {
         $document = $mail->getAttachments(DocumentKind::Document)[0];
-        $text = $document->getContent();       // Full extracted text, not the summary.
-        $summary = $document->getSummary();   // Already cached, no additional AI call.
-        $rawFile = $document->getRawFile();   // PhoreTempFile; retain while using its path.
-        $rawBytes = $rawFile->get_contents(); // Exact original bytes; no conversion.
+        $text = $document->getContent();       // Full extract, not the summary.
+        $summary = $document->getSummary();   // Cached, no additional AI call.
+        $rawFile = $document->getRawFile();   // Keep the PhoreTempFile alive while in use.
+        $rawBytes = $rawFile->get_contents(); // Exact original bytes.
 
-        // Only the selected action accesses full text/raw data. No flag predicates.
         return $mail->reply('Here is the extracted text. Please verify it against the original document.', [
             Attachment::fromBytes('document.txt', 'text/plain', $text),
         ]);
-        // Result: ScheduledMailActions with one sendReply item and one text attachment.
-        // $mail->subject/from/to/date, $summary and $rawBytes remain available here.
-    }
-}
-
-final class DocumentInbox
-{
-    public function __construct(private MailActionMatcher $matcher) {}
-
-    #[OnFolderAutomation(Folder::Inbox)]
-    public function handle(Email $mail, MailContext $context): MailAction
-    {
-        return ($this->matcher)($mail, $context);
     }
 }
 
@@ -70,9 +57,11 @@ $automation = new MailAutomation(
         attachmentClasses: DocumentKind::class,
     ),
 );
-$automation->addRules(new DocumentInbox(new MailActionMatcher(new DocumentActions())));
+// No OnFolderAutomation adapter or manual forwarding method is necessary.
+// Pass [new LeadActions(), new ProfileActions()] to share choices across classes.
+$automation->addMailActions(new DocumentActions());
 
-// Preview: analysis and selection run, but no selected business handler is called.
-// A deliberate run(dryRun: false) saves replies as drafts, unless a DraftSender is supplied.
+// Preview selects only: no business handler, scheduled action, draft or send.
+// run(dryRun: false) saves replies as drafts unless an explicit DraftSender is supplied.
 $report = $automation->run(dryRun: true);
 $automation->logger()->result('Preview finished: skipped={}, errors={}', [$report->skipped, count($report->errors())]);

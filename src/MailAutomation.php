@@ -110,6 +110,54 @@ final class MailAutomation
         $this->logger->debug('Registered automation {} for folder {}', [$id, $folder instanceof Folder ? $folder->value : $folder]);
     }
 
+    /**
+     * Register semantic handlers directly, including their declared source folders.
+     * All objects in this call share one AI choice set. Standard folders are
+     * resolved once and deduplicated; no application-owned forwarding adapter is needed.
+     *
+     * @param object|list<object> $rules Objects with public #[OnMailAction] methods.
+     * @param array<string,mixed> $aiOptions Options passed to phore/ai-harness.
+     * @param bool $flagUnhandled Mark uncertain/unmatched mail for manual review.
+     * @param int $maxContextBytes Summary context byte ceiling; never silently truncated.
+     * @param int $priority Priority relative to legacy folder rules.
+     * @param string $automationId Unique registration group ID.
+     * @throws \LogicException When no MailAnalyzer is configured.
+     * @throws \InvalidArgumentException For invalid or duplicate registrations.
+     * @example $automation->addMailActions([new LeadActions(), new ProfileActions()]);
+     * @see Attributes\OnMailAction
+     */
+    public function addMailActions(
+        object|array $rules,
+        array $aiOptions = [],
+        bool $flagUnhandled = false,
+        int $maxContextBytes = 100_000,
+        int $priority = 0,
+        string $automationId = 'ai-mail-actions',
+    ): self {
+        if ($this->mailAnalyzer === null) {
+            throw new \LogicException('Configure MailAutomation with mailAnalyzer before registering mail actions.');
+        }
+        if (trim($automationId) === '') {
+            throw new \InvalidArgumentException('Mail action automationId must not be empty.');
+        }
+        $matcher = new Analysis\MailActionMatcher($rules, $aiOptions, $flagUnhandled, $maxContextBytes);
+        $folders = [];
+        foreach ($matcher->folders() as $folder) {
+            $resolved = $this->resolveFolder($folder);
+            $folders[$resolved] = $automationId . ':' . hash('sha256', $resolved);
+        }
+        // Validate the complete group before adding any folder to the engine.
+        foreach ($folders as $id) {
+            if (isset($this->ruleIds[$id])) {
+                throw new \InvalidArgumentException('Duplicate automationId: ' . $id);
+            }
+        }
+        foreach ($folders as $folder => $id) {
+            $this->register((string)$folder, static fn(Email $mail, MailContext $context): bool => true, $matcher, $priority, $id);
+        }
+        return $this;
+    }
+
     public function addRules(object|callable|string $rules): self
     {
         if (is_string($rules) && function_exists($rules)) {
@@ -403,6 +451,16 @@ final class MailAutomation
                     break;
                 case 'removeFlag':
                     $current = $this->client->removeFlag($current,$item['args'][0]);
+                    break;
+                case 'sendMail':
+                    if ($this->sender === null) {
+                        $this->client->saveDraft($item['args'][0]);
+                    } else {
+                        $this->sender->send($item['args'][0]);
+                        if ($this->client->isAutomatic('answered')) {
+                            $current = $this->client->markAnswered($current);
+                        }
+                    }
                     break;
                 case 'sendReply':
                     $reply = $this->client->reply($current,$item['args'][0]);

@@ -18,30 +18,27 @@ use ReflectionMethod;
 use ReflectionObject;
 use UnexpectedValueException;
 
-/** Select one registered business action from summaries; dispatch only in PHP. */
+/** Select at most one registered business action from conversation summaries. */
 final class MailActionMatcher
 {
-    /** @var array<string,array{condition:string,handle:\Closure,guard:?\Closure}> */
+    /** @var array<string,array{condition:string,handle:\Closure,guard:?\Closure,folder:Folder|string}> */
     private array $actions = [];
 
     /**
-     * Read public #[OnMailAction] methods without invoking them or calling AI.
+     * Read public #[OnMailAction] methods without invoking handlers or AI.
+     * Pass all cooperating rule objects together: they form ONE choice set,
+     * not independent matchers whose registration order determines the outcome.
      *
-     * Handlers receive (AnalyzedMail, MailContext) and return MailAction. Guards
-     * belong to the application and must enforce permissions independently of AI.
-     * No arbitrary model-generated method name is ever called.
-     *
-     * @param object $rules Application object containing attributed methods.
+     * @param object|list<object> $rules Attributed application handlers.
      * @param array<string,mixed> $aiOptions Harness client/model/reasoning/timeouts/debug_log.
      * @param bool $flagUnhandled Return actionRequired rather than pass for no match.
-     * @param int $maxContextBytes Hard byte ceiling; exceeding it abstains without truncation.
-     * @throws InvalidArgumentException For duplicate choices or invalid registrations/options.
-     * @example $automation->addRules(new MailActionMatcher(new ApplicantActions()));
-     * @see OnMailAction
-     * @see \Lack\MailAutomation\MailAutomation::addRules()
+     * @param int $maxContextBytes Hard byte ceiling; exceeding it abstains.
+     * @throws InvalidArgumentException For invalid registrations/options or duplicate IDs.
+     * @example $automation->addMailActions([new LeadActions(), new ProfileActions()]);
+     * @see \Lack\MailAutomation\MailAutomation::addMailActions()
      */
     public function __construct(
-        object $rules,
+        object|array $rules,
         private array $aiOptions = [],
         private bool $flagUnhandled = false,
         private int $maxContextBytes = 100_000,
@@ -50,41 +47,61 @@ final class MailActionMatcher
         if ($maxContextBytes < 1 || array_diff(array_keys($aiOptions), $allowed) !== []) {
             throw new InvalidArgumentException('Invalid matcher context limit or AI options.');
         }
-        $reflection = new ReflectionObject($rules);
-        foreach ($reflection->getMethods(ReflectionMethod::IS_PUBLIC) as $method) {
-            foreach ($method->getAttributes(OnMailAction::class) as $attribute) {
-                $config = $attribute->newInstance();
-                $id = $config->id ?? $method->getName();
-                if (isset($this->actions[$id])) {
-                    throw new InvalidArgumentException('Duplicate mail action ID: ' . $id);
-                }
-                if ($config->when !== null && (!$reflection->hasMethod($config->when) || !$reflection->getMethod($config->when)->isPublic())) {
-                    throw new InvalidArgumentException('Unknown public eligibility method: ' . $config->when);
-                }
-                $this->actions[$id] = [
-                    'condition' => $config->condition,
-                    'handle' => \Closure::fromCallable([$rules, $method->getName()]),
-                    'guard' => $config->when === null ? null : \Closure::fromCallable([$rules, $config->when]),
-                ];
-            }
+        $objects = is_array($rules) ? $rules : [$rules];
+        if ($objects === [] || !array_is_list($objects)) {
+            throw new InvalidArgumentException('Mail actions require an object or a nonempty list of objects.');
         }
-        if ($this->actions === []) {
-            throw new InvalidArgumentException('No public OnMailAction methods found.');
+        foreach ($objects as $object) {
+            if (!is_object($object)) {
+                throw new InvalidArgumentException('Each mail action registration must be an object.');
+            }
+            $reflection = new ReflectionObject($object);
+            $found = false;
+            foreach ($reflection->getMethods(ReflectionMethod::IS_PUBLIC) as $method) {
+                foreach ($method->getAttributes(OnMailAction::class) as $attribute) {
+                    $found = true;
+                    $config = $attribute->newInstance();
+                    $id = $config->id ?? $method->getName();
+                    if (isset($this->actions[$id])) {
+                        throw new InvalidArgumentException('Duplicate mail action ID: ' . $id);
+                    }
+                    if ($config->when !== null && (!$reflection->hasMethod($config->when) || !$reflection->getMethod($config->when)->isPublic())) {
+                        throw new InvalidArgumentException('Unknown public eligibility method: ' . $config->when);
+                    }
+                    $this->actions[$id] = [
+                        'condition' => $config->condition,
+                        'handle' => \Closure::fromCallable([$object, $method->getName()]),
+                        'guard' => $config->when === null ? null : \Closure::fromCallable([$object, $config->when]),
+                        'folder' => $config->folder,
+                    ];
+                }
+            }
+            if (!$found) {
+                throw new InvalidArgumentException('No public OnMailAction methods found on ' . $object::class . '.');
+            }
         }
     }
 
     /**
-     * Decide without executing any handler or changing mailbox/storage state.
-     *
-     * Only metadata, mail summaries and attachment summaries enter the fresh AI
-     * context. Missing references, incomplete documents, no eligible actions,
-     * oversized context or an uncertain/no-match response return null. A model
-     * decision is not proof of sender identity or authorization.
-     *
-     * @return ?string Registered action ID, or null; never a free-form method name.
+     * Return declared source folders without accessing the mailbox.
+     * The automation resolves standard folders and deduplicates physical names.
+     * @return list<Folder|string>
+     * @example $folders = $matcher->folders();
+     * @see \Lack\MailAutomation\MailAutomation::addMailActions()
+     */
+    public function folders(): array
+    {
+        return array_values(array_map(static fn(array $action): Folder|string => $action['folder'], $this->actions));
+    }
+
+    /**
+     * Decide without executing handlers or writing mailbox/storage state.
+     * Folder filtering and deterministic guards happen before the AI call.
+     * Only summaries and metadata enter a fresh context; incomplete or missing
+     * evidence, oversized context, uncertainty or no eligible choice abstain.
+     * @return ?string Registered action ID, or null.
      * @throws UnexpectedValueException For invalid guard or model results.
      * @example $actionId = $matcher->select($analyzed, $context);
-     * @see self::__invoke()
      */
     public function select(AnalyzedMail $mail, MailContext $context): ?string
     {
@@ -101,9 +118,14 @@ final class MailActionMatcher
             return null;
         }
 
-        // Fachliche Berechtigungen vor der KI-Auswahl ausschliessen.
         $choices = [];
         foreach ($this->actions as $id => $action) {
+            $folder = $action['folder'] instanceof Folder
+                ? $action['folder']->resolve($context->mailbox->client)
+                : $action['folder'];
+            if ($folder !== $context->folder) {
+                continue;
+            }
             if ($action['guard'] !== null) {
                 $eligible = ($action['guard'])($mail, $context);
                 if (!is_bool($eligible)) {
@@ -138,30 +160,26 @@ final class MailActionMatcher
     }
 
     /**
-     * Inbox adapter registered by MailAutomation::addRules().
-     *
-     * Stores the selected ID as message metadata and invokes exactly that PHP
-     * handler. The returned schedule is executed later by MailAutomation. Dry-run
-     * performs selection only: no handler invocation, metadata write or schedule.
-     * No match leaves the mailbox unchanged unless flagUnhandled was enabled.
-     *
-     * @throws \LogicException When MailAutomation has no MailAnalyzer configured.
-     * @throws UnexpectedValueException If the selected handler does not return MailAction.
-     * @example $automation->addRules($matcher); $report = $automation->run();
-     * @see AnalyzedMail::reply()
+     * Dispatch the selected PHP handler; the engine executes its returned schedule.
+     * Dry-run selects only: no handler, action metadata, draft or send operation.
+     * The Inbox attribute preserves the old addRules($matcher) registration;
+     * use addMailActions($rules) to register all declared folders automatically.
+     * @throws \LogicException Without a configured MailAnalyzer.
+     * @throws UnexpectedValueException If a handler does not return MailAction.
+     * @example $automation->addMailActions(new ApplicantActions());
      */
     #[OnFolderAutomation(Folder::Inbox, automationId: 'ai-mail-actions')]
     public function __invoke(Email $mail, MailContext $context): MailAction
     {
-        $analyzed = $context->analysis ?? throw new \LogicException('Configure MailAutomation with mailAnalyzer before registering MailActionMatcher.');
+        $analyzed = $context->analysis ?? throw new \LogicException('Configure MailAutomation with mailAnalyzer before registering mail actions.');
         $id = $this->select($analyzed, $context);
         if ($context->dryRun) {
             return MailActions::pass();
         }
-        $context->metadata->set('ai.action', $id);
         if ($id === null) {
             return $this->flagUnhandled ? MailActions::actionRequired() : MailActions::pass();
         }
+        $context->metadata->set('ai.action', $id);
         $result = ($this->actions[$id]['handle'])($analyzed, $context);
         if (!$result instanceof MailAction) {
             throw new UnexpectedValueException('Mail action handlers must return MailAction: ' . $id);

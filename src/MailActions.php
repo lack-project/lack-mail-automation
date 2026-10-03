@@ -108,6 +108,23 @@ final class ScheduledMailActions implements MailAction
     { return $this->queue('moveToRaw', [$folder,$reprocess]); }
 
     /**
+     * Schedule a new message, e.g. an initial contact to the person named in a lead.
+     * Unlike sendReply(), this does not derive recipients from the source mail.
+     * The application must validate/authorize recipients before constructing it.
+     * The engine uses the same DraftSender/draft and dry-run semantics as replies.
+     * @throws \InvalidArgumentException When no recipient is set.
+     * @example return MailActions::schedule()->sendMail($initialContact)->moveTo('processed_leads');
+     * @see self::sendReply()
+     */
+    public function sendMail(\Phore\MailClient\Email $mail): self
+    {
+        if ([...$mail->to(), ...$mail->cc(), ...$mail->bcc()] === []) {
+            throw new \InvalidArgumentException('A scheduled message requires at least one recipient.');
+        }
+        return $this->queue('sendMail', [$mail]);
+    }
+
+    /**
      * Schedule a reply, optionally containing original or generated attachments.
      * No I/O occurs here. MailAutomation saves a draft by default, or passes it
      * to an explicitly configured DraftSender; dry-run executes neither.
