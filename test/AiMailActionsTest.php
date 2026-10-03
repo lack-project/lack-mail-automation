@@ -138,6 +138,12 @@ final class AiMailActionsTest extends TestCase
         self::assertCount(2, $conversation->data()['messages']);
         self::assertSame('Previous body', $conversation->data()['messages'][0]['content']);
         self::assertSame('Current body', $conversation->data()['messages'][1]['content']);
+
+        $context = new AiContext(prompts: [$conversation]);
+        $current->ai_set_context($context);
+        self::assertSame($context, $current->ai_get_context());
+        self::assertSame($current, $current->ai_set_checkpoint('analyzed'));
+        self::assertSame($current, $current->ai_rollback('analyzed'));
     }
 
     public function testActionNeedsConditionOrGuard(): void

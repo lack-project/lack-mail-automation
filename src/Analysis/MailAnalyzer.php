@@ -226,7 +226,7 @@ final class MailAnalyzer
             return $this->analyze($previousMail, $client, $storage, $entry->direction, $persist);
         };
 
-        return new AnalyzedMail(
+        $analyzed = new AnalyzedMail(
             original: $mail,
             analysis: $analysis,
             metadata: $metadata,
@@ -237,6 +237,15 @@ final class MailAnalyzer
             scopeStore: $scopeStore,
             historyLoader: $loader,
         );
+
+        // Business AI calls start from the fully analyzed conversation, not from
+        // the internal extraction requests used while building that conversation.
+        $analyzed->ai_set_context(new AiContext(
+            prompts: [$analyzed->conversationPrompt()],
+            options: $this->aiOptions,
+        ));
+
+        return $analyzed;
     }
 
     private function interpret(StructPrompt|FilePrompt|ImagePrompt $source, ?string $originalText): ContentAnalysis

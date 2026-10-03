@@ -9,6 +9,7 @@ use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\Prompt\ConversationPrompt;
 use Lack\MailAutomation\Prompt\MailPrompt;
+use Phore\AiHarness\AiContextTrait;
 use Phore\AiHarness\PromptType\PromptType;
 use Phore\AiHarness\PromptType\StructPrompt;
 use Phore\FileSystem\PhoreTempFile;
@@ -57,6 +58,17 @@ final readonly class ResponseMailDraft
 {
     public function __construct(
         public bool $answerable,
+        public string $markdown,
+        public string $reason,
+    ) {
+    }
+}
+
+final readonly class GeneratedMailDraft
+{
+    public function __construct(
+        public bool $answerable,
+        public string $subject,
         public string $markdown,
         public string $reason,
     ) {
@@ -163,6 +175,8 @@ final readonly class MailSummary
 
 final readonly class AnalyzedMail
 {
+    use AiContextTrait;
+
     public string $subject;
     public ?DateTimeImmutable $date;
     public array $from;
@@ -261,14 +275,14 @@ final readonly class AnalyzedMail
      * Create a native schema-backed AI Harness prompt for this mail.
      *
      * Mail content remains external/untrusted data by default. The returned
-     * StructPrompt can be passed directly to phore_ai_text(), phore_ai_struct()
-     * and the other phore/ai-harness helpers without manually copying fields.
+     * StructPrompt can be passed directly to phore_ai_* helpers without manually
+     * copying subject, addresses, body or attachment summaries.
      *
      * @param ?string $alias Prompt reference alias.
      * @param ?string $instructions Optional application guidance for this source.
      * @param bool $allowInstructions Whether instructions contained in the mail itself may influence the model.
      * @return StructPrompt Schema-backed prompt containing the current mail.
-     * @example $draft = phore_ai_struct([$promptFile, $mail->prompt('incomingEmail')], Draft::class);
+     * @example $draft = $mail->ai_struct([$promptFile, $mail->prompt('incomingEmail')], Draft::class);
      * @see MailPrompt::from()
      */
     public function prompt(
@@ -301,52 +315,160 @@ final readonly class AnalyzedMail
     }
 
     /**
-     * Generate and schedule a reply directly from an application prompt.
+     * Generate and schedule a reply using this mail's bound AI conversation.
      *
-     * The full conversation prompt is appended automatically. The structured
-     * result can explicitly decline when the supplied context is insufficient.
-     * Long reply instructions should normally live in a PromptFile. The optional
-     * attachment callback runs only after a usable draft was generated.
+     * MailAnalyzer prepares the AI context with conversationPrompt(), so callers
+     * normally pass only the application PromptFile. The same context cursor is
+     * reused by action matching and subsequent ai_* calls on this object.
      *
      * @param string|PromptType|array<int,string|PromptType> $prompt Application prompt or prompt list.
-     * @param array<string,mixed> $options phore/ai-harness request options.
+     * @param array<string,mixed> $options Per-call phore/ai-harness options.
      * @param null|callable(ResponseMailDraft, self): array<Attachment|AnalyzedAttachment> $attachments Attachment factory.
      * @return MailAction Scheduled reply or actionRequired when the model cannot answer safely.
      * @throws UnexpectedValueException If the attachment callback does not return an array.
-     * @example return $mail->createResponseMail(new PromptFile(__DIR__ . '/reply.md'), $aiOptions);
-     * @see conversationPrompt()
+     * @example return $mail->ai_answer(new PromptFile(__DIR__ . '/reply.md'));
+     * @see AiContextTrait::ai_struct()
+     */
+    public function ai_answer(
+        string|PromptType|array $prompt,
+        array $options = [],
+        ?callable $attachments = null,
+    ): MailAction {
+        $prompts = is_array($prompt) ? array_values($prompt) : [$prompt];
+        $prompts[] = 'Return answerable=false when the supplied conversation is insufficient or contradictory. '
+            . 'When answerable=true, markdown must contain only the complete send-ready reply body. '
+            . 'Use reason for a short explanation when answerable=false.';
+
+        /** @var ResponseMailDraft $draft */
+        $draft = $this->ai_struct($prompts, ResponseMailDraft::class, $options);
+        if (!$draft->answerable || trim($draft->markdown) === '') {
+            return MailActions::actionRequired();
+        }
+
+        return $this->reply($draft->markdown, $this->resolveGeneratedAttachments($attachments, $draft));
+    }
+
+    /**
+     * Alias for ai_answer() when application vocabulary prefers reply.
+     *
+     * @param string|PromptType|array<int,string|PromptType> $prompt Application prompt or prompt list.
+     * @param array<string,mixed> $options Per-call phore/ai-harness options.
+     * @param null|callable(ResponseMailDraft, self): array<Attachment|AnalyzedAttachment> $attachments Attachment factory.
+     * @return MailAction Scheduled reply or actionRequired.
+     * @example return $mail->ai_reply(new PromptFile(__DIR__ . '/reply.md'));
+     * @see ai_answer()
+     */
+    public function ai_reply(
+        string|PromptType|array $prompt,
+        array $options = [],
+        ?callable $attachments = null,
+    ): MailAction {
+        return $this->ai_answer($prompt, $options, $attachments);
+    }
+
+    /**
+     * Generate and schedule a new mail to an explicitly supplied recipient.
+     *
+     * The model generates subject/body only; recipients remain deterministic
+     * application input and are never invented by the model.
+     *
+     * @param string|array $to Recipient accepted by phore/mail-client Email.
+     * @param string|PromptType|array<int,string|PromptType> $prompt Application prompt or prompt list.
+     * @param array<string,mixed> $options Per-call phore/ai-harness options.
+     * @param null|callable(GeneratedMailDraft, self): array<Attachment|AnalyzedAttachment> $attachments Attachment factory.
+     * @param ?string $subject Fixed subject; null lets the model generate it.
+     * @return MailAction Scheduled new mail or actionRequired.
+     * @example return $mail->ai_mail($recipient, new PromptFile(__DIR__ . '/initial.md'));
+     * @see MailActions::schedule()
+     */
+    public function ai_mail(
+        string|array $to,
+        string|PromptType|array $prompt,
+        array $options = [],
+        ?callable $attachments = null,
+        ?string $subject = null,
+    ): MailAction {
+        $prompts = is_array($prompt) ? array_values($prompt) : [$prompt];
+        $prompts[] = $subject === null
+            ? 'Return answerable=false when the supplied context is insufficient or contradictory. '
+                . 'When answerable=true, return a concise subject and the complete send-ready markdown body.'
+            : 'Return answerable=false when the supplied context is insufficient or contradictory. '
+                . 'When answerable=true, return the complete send-ready markdown body. The application fixes the subject.';
+
+        /** @var GeneratedMailDraft $draft */
+        $draft = $this->ai_struct($prompts, GeneratedMailDraft::class, $options);
+        if (!$draft->answerable || trim($draft->markdown) === '') {
+            return MailActions::actionRequired();
+        }
+
+        $resolvedSubject = $subject ?? trim($draft->subject);
+        if ($resolvedSubject === '') {
+            return MailActions::actionRequired();
+        }
+
+        $mail = (new Email(to: $to, subject: $resolvedSubject))->withMarkdown($draft->markdown);
+        foreach ($this->normalizeAttachments($this->resolveGeneratedAttachments($attachments, $draft)) as $attachment) {
+            $mail = $mail->attach($attachment);
+        }
+
+        return MailActions::schedule()->sendMail($mail);
+    }
+
+    /**
+     * Generate and schedule a forward-style mail with a deterministic recipient.
+     *
+     * The subject defaults to the source subject prefixed with Fwd:. Original
+     * attachments can be copied explicitly; the generated body is controlled by
+     * the supplied PromptFile and the prepared conversation context.
+     *
+     * @param string|array $to Forward recipient.
+     * @param string|PromptType|array<int,string|PromptType> $prompt Application prompt or prompt list.
+     * @param array<string,mixed> $options Per-call phore/ai-harness options.
+     * @param bool $includeOriginalAttachments Copy the current source attachments.
+     * @return MailAction Scheduled forward-style mail or actionRequired.
+     * @example return $mail->ai_forward('office@example.org', new PromptFile(__DIR__ . '/forward.md'));
+     * @see ai_mail()
+     */
+    public function ai_forward(
+        string|array $to,
+        string|PromptType|array $prompt,
+        array $options = [],
+        bool $includeOriginalAttachments = false,
+    ): MailAction {
+        $subject = preg_match('/^Fwd:/i', $this->subject) === 1
+            ? $this->subject
+            : 'Fwd: ' . $this->subject;
+
+        $attachments = $includeOriginalAttachments
+            ? fn (): array => $this->attachments
+            : null;
+
+        return $this->ai_mail($to, $prompt, $options, $attachments, $subject);
+    }
+
+    /**
+     * Backwards-compatible name for ai_answer().
+     *
+     * @param string|PromptType|array<int,string|PromptType> $prompt Application prompt or prompt list.
+     * @param array<string,mixed> $options Per-call phore/ai-harness options.
+     * @param null|callable(ResponseMailDraft, self): array<Attachment|AnalyzedAttachment> $attachments Attachment factory.
+     * @return MailAction Scheduled reply or actionRequired.
+     * @example return $mail->createResponseMail(new PromptFile(__DIR__ . '/reply.md'));
+     * @see ai_answer()
      */
     public function createResponseMail(
         string|PromptType|array $prompt,
         array $options = [],
         ?callable $attachments = null,
     ): MailAction {
-        $prompts = is_array($prompt) ? array_values($prompt) : [$prompt];
-        $prompts[] = $this->conversationPrompt();
-        $prompts[] = 'Return answerable=false when the supplied conversation is insufficient or contradictory. '
-            . 'When answerable=true, markdown must contain only the complete send-ready reply body. '
-            . 'Use reason for a short explanation when answerable=false.';
-
-        /** @var ResponseMailDraft $draft */
-        $draft = phore_ai_struct($prompts, ResponseMailDraft::class, $options);
-
-        if (!$draft->answerable || trim($draft->markdown) === '') {
-            return MailActions::actionRequired();
-        }
-
-        $files = $attachments === null ? [] : $attachments($draft, $this);
-        if (!is_array($files)) {
-            throw new UnexpectedValueException('Response mail attachment callback must return an array.');
-        }
-
-        return $this->reply($draft->markdown, $files);
+        return $this->ai_answer($prompt, $options, $attachments);
     }
 
     /**
      * Return legacy array context for compatibility.
      *
-     * Prefer conversationPrompt() for AI requests so schema and source policy are
-     * applied centrally instead of reconstructing StructPrompt values in consumers.
+     * Prefer the bound ai_* API for AI requests so the prepared conversation and
+     * shared provider cursor are not reconstructed in consumers.
      */
     public function routingContext(): array
     {
@@ -367,14 +489,38 @@ final readonly class AnalyzedMail
 
     public function reply(string $markdown, array $attachments = []): MailAction
     {
+        return MailActions::schedule()->sendReply($markdown, $this->normalizeAttachments($attachments));
+    }
+
+    /**
+     * @param null|callable(object, self): array<Attachment|AnalyzedAttachment> $callback
+     * @return array<Attachment|AnalyzedAttachment>
+     */
+    private function resolveGeneratedAttachments(?callable $callback, object $draft): array
+    {
+        if ($callback === null) {
+            return [];
+        }
+
+        $files = $callback($draft, $this);
+        if (!is_array($files)) {
+            throw new UnexpectedValueException('Generated mail attachment callback must return an array.');
+        }
+
+        return array_values($files);
+    }
+
+    /** @return list<Attachment> */
+    private function normalizeAttachments(array $attachments): array
+    {
         $files = [];
         foreach ($attachments as $attachment) {
             if (!$attachment instanceof Attachment && !$attachment instanceof AnalyzedAttachment) {
-                throw new \InvalidArgumentException('Reply attachments must be Attachment or AnalyzedAttachment objects.');
+                throw new \InvalidArgumentException('Mail attachments must be Attachment or AnalyzedAttachment objects.');
             }
             $files[] = $attachment instanceof AnalyzedAttachment ? $attachment->toAttachment() : $attachment;
         }
 
-        return MailActions::schedule()->sendReply($markdown, $files);
+        return $files;
     }
 }

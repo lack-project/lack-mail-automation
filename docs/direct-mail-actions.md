@@ -159,3 +159,45 @@ reply attachments after a usable draft was generated.
 Short one-line tasks such as a simple classification may stay inline. Prompts
 for composing mails, profiles, CV revisions or other growing business content
 should live in dedicated Markdown files next to the action that owns them.
+
+
+## Bound AI context on AnalyzedMail
+
+`MailAnalyzer` prepares one `AiContext` from the complete analyzed
+conversation and binds it to the returned `AnalyzedMail`. Action matching and
+all later `ai_*` calls therefore share one provider conversation cursor:
+
+```php
+$isFirstReply = $mail->ai_yes_no(
+    'Is this the first applicant reply after our outgoing message?',
+);
+
+$topic = $mail->ai_choice(
+    'Which request is currently open?',
+    ['question', 'profile', 'cv'],
+);
+```
+
+All generic methods come from `phore/ai-harness`'s `AiContextTrait`, including
+`ai_text()`, `ai_do()`, `ai_struct()`, `ai_choices()` and checkpoints.
+The analyzer's internal extraction requests are intentionally not reused as the
+business conversation; the bound context starts only after analysis is
+complete.
+
+Mail-specific helpers build on the same context:
+
+```php
+return $mail->ai_answer(
+    new PromptFile(__DIR__ . '/_prompt/answer-question.md'),
+);
+```
+
+`ai_reply()` is an alias for `ai_answer()`. `ai_mail()` generates a new
+mail while the recipient remains explicit application input, and
+`ai_forward()` generates a forward-style mail with a deterministic recipient.
+This deliberately prevents the model from inventing delivery targets.
+`createResponseMail()` remains as a backwards-compatible alias.
+
+Long mail-generation instructions belong in external Markdown `PromptFile`
+files. Short questions to the already prepared conversation, such as
+`ai_yes_no()` or `ai_choice()`, can remain inline.
