@@ -12,7 +12,7 @@
     "ext-json": "*",
     "ext-pdo": "*",
     "ext-pdo_sqlite": "*",
-    "phore/ai-harness": "dev-feat/ai-context-trait as dev-main",
+    "phore/ai-harness": "dev-main",
     "phore/filesystem": "*",
     "phore/log": "dev-master",
     "phore/mail-client": "dev-main"

@@ -1,203 +1,148 @@
-# Direct mail actions
+# Mail content actions
 
-The content-driven API has no separate mail or attachment classification type
-system. `MailAnalyzer` extracts mail/attachment content and stores the observed
-conversation. `OnMailAction` decides what to do next.
+\`MailAnalyzer\` returns \`MailContent\`. \`MailContent\` extends the AI Harness
+\`AiContent\` abstraction and owns the conversation context used for action
+matching and later business work.
+
+The context is prepared in this order:
+
+1. a compact chronological conversation summary and attachment index;
+2. complete historic mail bodies as \`AiText\`;
+3. supported current and historic attachments as the matching \`AiDocument\`
+   specialization such as \`AiImage\`, \`AiMarkdown\` or \`AiText\`;
+4. the complete current mail body as the \`MailContent\` source itself.
+
+This keeps the summary as the normal starting point while full source material
+remains available in the same context.
 
 ## One class per action
 
-Prefer one invokable class for each business action:
+Each business action is an invokable class with \`#[OnMailAction]\`. Put routing
+semantics into \`condition\`; deterministic \`when\` guards remain available as
+an optional library feature but are not required for normal AI-routed
+workflows.
 
-```php
+\`\`\`php
 #[OnMailAction(
-    condition: 'The applicant asks to change the existing profile and this request is still open.',
+    condition: 'The applicant asks to create or update the profile and that request is still open.',
 )]
-final class ChangeProfile
+final class ProfileAction
 {
-    public function __invoke(AnalyzedMail $mail, MailContext $context): MailAction
+    public function __invoke(MailContent $mail, MailContext $context): MailAction
     {
-        $scope = $mail->scopeFor('applicant:' . strtolower($mail->from[0]));
-        $profile = $scope->getFile('profile.md');
-
-        // generate the new profile from mail->routingContext() and the stored file
-        $scope->putFile('profile.md', $newProfile, 'text/markdown');
-
-        return $mail->reply('The updated profile is attached.');
+        return $mail->ai_reply(
+            new PromptFile(__DIR__ . '/_prompts/reply.md'),
+        );
     }
 }
-```
+\`\`\`
 
-Register all cooperating actions once:
+Register the cooperating actions once:
 
-```php
-$automation = new MailAutomation(
-    client: $client,
-    storage: '/var/lib/app/mail.sqlite',
-    mailAnalyzer: new MailAnalyzer(aiOptions: $aiOptions),
-);
-
+\`\`\`php
 $automation->addMailActions([
-    new InitialContact(),
-    new FirstReply(),
-    new ChangeProfile(),
+    new MetaLeadAction(),
+    new ApplicantReplyAction(),
+    new ProfileAction(),
 ]);
-```
+\`\`\`
 
-## `when` before AI
+The matcher evaluates all conditions against the bound \`MailContent\` context
+and selects at most one action.
 
-`when` is only a deterministic pre-filter. It runs before any AI choice.
-A same-object method name remains supported. For class-based actions prefer a
-static callable:
+## Action directory notation
 
-```php
-#[OnMailAction(
-    when: [MetaLead::class, 'isSource'],
-    condition: 'The message contains only applicant data for a new lead.',
-)]
-final class MetaLead
-{
-    public static function isSource(AnalyzedMail $mail, MailContext $context): bool
-    {
-        return $mail->from === ['forwarder@example.org'];
-    }
+Applications should keep actions in numeric ten-step directories. This leaves
+room for inserting a new step without renaming all existing directories. The
+action PHP file is directly inside its step directory. Prompt files live in
+\`_prompts\`; the leading underscore marks support data that is not part of the
+PHP namespace.
+
+\`\`\`text
+automail/
+└── bewerber/
+    ├── 10-meta-lead/
+    │   ├── MetaLeadAction.php
+    │   └── _prompts/
+    │       └── action.md
+    ├── 20-applicant-reply/
+    │   ├── ApplicantReplyAction.php
+    │   └── _prompts/
+    │       └── action.md
+    ├── 30-profile/
+    │   ├── ProfileAction.php
+    │   └── _prompts/
+    │       └── action.md
+    └── 40-cv/
+        ├── CvAction.php
+        └── _prompts/
+            └── action.md
+\`\`\`
+
+Use Composer classmap autoloading when the numeric directory names intentionally
+do not mirror PHP namespaces.
+
+## Attachments are AI content
+
+\`getAttachments()\` returns AI Harness \`AiDocument\` objects. The analyzer
+factory returns specializations such as \`AiImage\`, \`AiMarkdown\` or
+\`AiText\` where possible.
+
+\`\`\`php
+foreach ($mail->getAttachments() as $document) {
+    $text = $document->extractText();
 }
-```
+\`\`\`
 
-PHP attributes cannot contain closures. A static callable array is the direct,
-constant-expression equivalent. If `condition` is omitted, a successful
-`when` selects that action without an AI call. More than one matching
-guard-only action is treated as an ambiguous configuration.
+The complete mail context can also select content by meaning:
 
-## Conversation is the state
-
-`routingContext()` contains the complete observed mail bodies in chronological
-order, attachment summaries, missing-reference information, and a snapshot of
-the conversation scope. The matcher asks the configured conditions against that
-conversation instead of requiring application tags such as "profile created" or
-"first reply".
-
-There is intentionally no `MailType`, attachment enum, or classification
-result in the analyzer API.
-
-## Metadata and files
-
-Every analyzed mail exposes a default thread scope:
-
-```php
-$scope = $mail->scope();
-
-$scope->set('note', 'manual review complete');
-$scope->get('note');
-
-$scope->putFile('profile.md', $markdown, 'text/markdown');
-$scope->hasFile('profile.md');
-$scope->fileModifiedAt('profile.md');
-$scope->getFile('profile.md')?->content;
-$scope->files();
-```
-
-Applications can deliberately create a stable recipient/customer scope that
-spans several mail threads:
-
-```php
-$scope = $mail->scopeFor('applicant:' . strtolower($mail->from[0]));
-```
-
-`ConversationStore` is the persistence interface. By default
-`AutomationStorageConversationStore` stores metadata and file bytes through the
-existing `AutomationStorage`; with the standard `SqliteStorage` this means the
-same SQLite database. An application can pass another `ConversationStore` to
-`MailAnalyzer` when data belongs in another backend.
-
-## Attachments
-
-Attachments are analyzed but not classified. Each attachment has a stable ID,
-filename, media type, summary, extracted content, original bytes, and
-`getRawFile()`. If an action needs to find the CV, it can make that decision
-from the attachment summaries/full content after the action itself has been
-selected.
-
-Technical processing flags (`processed`, `error`, `actionRequired`) remain
-engine mechanics. They are not semantic conversation state.
-
-
-## Schema-backed mail prompts
-
-Consumers should not rebuild mail arrays with `StructPrompt`. LACK exposes
-schema-backed factories that return native AI Harness `StructPrompt` objects:
-
-```php
-$mailPrompt = $mail->prompt(alias: 'incomingEmail');
-$conversationPrompt = $mail->conversationPrompt(alias: 'conversation');
-
-$result = phore_ai_struct([
-    new PromptFile(__DIR__ . '/_prompt/action.md'),
-    $conversationPrompt,
-], Result::class, $aiOptions);
-```
-
-The schema is generated from LACK's internal prompt DTOs through the normal
-`phore/schema` integration used by `StructPrompt`. Mail and conversation
-content remain untrusted by default. `allowInstructions: true` must be an
-explicit application decision.
-
-For reusable long-form reply generation, use an external Markdown prompt and
-`createResponseMail()`:
-
-```php
-return $mail->createResponseMail(
-    new PromptFile(__DIR__ . '/_prompt/answer-question.md'),
-    $aiOptions,
-);
-```
-
-The method appends the complete `conversation` prompt automatically and
-returns either a scheduled reply or `actionRequired()` when the model reports
-that the available context is insufficient. An optional callback can create
-reply attachments after a usable draft was generated.
-
-Short one-line tasks such as a simple classification may stay inline. Prompts
-for composing mails, profiles, CV revisions or other growing business content
-should live in dedicated Markdown files next to the action that owns them.
-
-
-## Bound AI context on AnalyzedMail
-
-`MailAnalyzer` prepares one `AiContext` from the complete analyzed
-conversation and binds it to the returned `AnalyzedMail`. Action matching and
-all later `ai_*` calls therefore share one provider conversation cursor:
-
-```php
-$isFirstReply = $mail->ai_yes_no(
-    'Is this the first applicant reply after our outgoing message?',
+\`\`\`php
+$images = $mail->ai_query_content(
+    'Which images show the applicant and are suitable as a profile photo?',
 );
 
-$topic = $mail->ai_choice(
-    'Which request is currently open?',
-    ['question', 'profile', 'cv'],
+$image = $images->first();
+\`\`\`
+
+Historic attachment bytes are loaded into the same content registry when the
+backing message is available. Unsupported MIME types remain generic
+\`AiDocument\` objects for storage or forwarding but are not sent to the AI
+context.
+
+## Mail generation
+
+Mail-specific operations build on the same context:
+
+\`\`\`php
+return $mail->ai_reply(
+    new PromptFile(__DIR__ . '/_prompts/reply.md'),
 );
-```
+\`\`\`
 
-All generic methods come from `phore/ai-harness`'s `AiContextTrait`, including
-`ai_text()`, `ai_do()`, `ai_struct()`, `ai_choices()` and checkpoints.
-The analyzer's internal extraction requests are intentionally not reused as the
-business conversation; the bound context starts only after analysis is
-complete.
+\`ai_mail()\` creates a new mail. A fixed recipient can be supplied by the
+application, or \`null\` lets the trusted business prompt derive the recipient
+from the conversation. The resulting address is syntax-validated before the
+action is scheduled.
 
-Mail-specific helpers build on the same context:
-
-```php
-return $mail->ai_answer(
-    new PromptFile(__DIR__ . '/_prompt/answer-question.md'),
+\`\`\`php
+return $mail->ai_mail(
+    null,
+    new PromptFile(__DIR__ . '/_prompts/initial-contact.md'),
 );
-```
+\`\`\`
 
-`ai_reply()` is an alias for `ai_answer()`. `ai_mail()` generates a new
-mail while the recipient remains explicit application input, and
-`ai_forward()` generates a forward-style mail with a deterministic recipient.
-This deliberately prevents the model from inventing delivery targets.
-`createResponseMail()` remains as a backwards-compatible alias.
+\`ai_forward()\` creates a forward-style mail with an explicit recipient and
+can optionally copy current attachments.
 
-Long mail-generation instructions belong in external Markdown `PromptFile`
-files. Short questions to the already prepared conversation, such as
-`ai_yes_no()` or `ai_choice()`, can remain inline.
+Direct \`reply()\` attachments are also \`AiDocument\` objects, so generated
+\`AiMarkdown\`, \`AiImage\` or other document types can be sent without
+converting them to mail-client attachments in application code.
+
+## Conversation scope
+
+\`scope()\` returns the thread scope. \`scopeFor($id)\` creates an application
+scope spanning several threads, for example \`applicant:<email>\`.
+
+The default \`ConversationStore\` persists metadata and file bytes in the same
+SQLite-backed \`AutomationStorage\`. Stored files are application state; AI
+processing of file content should use the AI Harness content classes.

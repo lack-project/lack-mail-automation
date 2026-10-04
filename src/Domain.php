@@ -350,7 +350,7 @@ final class MailContext
         public readonly bool $dryRun,
         private AutomationStorage $storage,
         private MailClient $client,
-        public readonly ?Analysis\AnalyzedMail $analysis = null,
+        public readonly ?Content\MailContent $mailContent = null,
     ) {
         $scopeId = $mail->messageId() ?? $mail->id() ?? 'object:' . spl_object_id($mail);
         $this->metadata = new MetadataBag($storage, 'message', $scopeId);

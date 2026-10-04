@@ -284,7 +284,7 @@ final class MailAutomation
                         continue;
                     }
                     // Auch Sent-Baseline und schon bearbeitete Mails liefern Verlaufskontext.
-                    $analysis = $this->mailAnalyzer?->analyze($mail, $this->client, $this->storage, $direction, persist: !$dryRun);
+                    $mailContent = $this->mailAnalyzer?->analyze($mail, $this->client, $this->storage, $direction, persist: !$dryRun);
                     if ($baselineSent) {
                         if ($this->blockingFlag($mail) !== null) {
                             $report->skipped++;
@@ -303,7 +303,7 @@ final class MailAutomation
                         $report->skipped++;
                         continue;
                     }
-                    $this->processMessage($mail, $folder, $direction, $dryRun, $report, $analysis);
+                    $this->processMessage($mail, $folder, $direction, $dryRun, $report, $mailContent);
                 } catch (\Throwable $error) {
                     $senders = array_map(static fn($address): string => $address->getAddress(), $mail->from());
                     $messageError = new \RuntimeException(sprintf(
@@ -352,7 +352,7 @@ final class MailAutomation
         }
     }
 
-    private function processMessage(Email $mail, string $folder, string $direction, bool $dryRun, RunReport $report, ?Analysis\AnalyzedMail $analysis = null): void
+    private function processMessage(Email $mail, string $folder, string $direction, bool $dryRun, RunReport $report, ?Content\MailContent $mailContent = null): void
     {
         $messageId = $mail->messageId() ?? $mail->id() ?? 'unknown';
         $messageLog = $this->logger->scope('message')->withContext(['messageId' => $messageId, 'folder' => $folder, 'direction' => $direction]);
@@ -377,7 +377,7 @@ final class MailAutomation
         }
         $messageLog->debug('Contact resolution status {}', [$resolution->status->value]);
 
-        $context = new MailContext($mail,$folder,$direction,$resolution->contact,$resolution,$messageLog,$dryRun,$this->storage,$this->client,$analysis);
+        $context = new MailContext($mail,$folder,$direction,$resolution->contact,$resolution,$messageLog,$dryRun,$this->storage,$this->client,$mailContent);
         $rules = $this->rulesFor($folder);
         $final = $mail;
         $handled = false;

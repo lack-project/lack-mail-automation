@@ -10,15 +10,15 @@ use Lack\MailAutomation\Analysis\ConversationFileInfo;
 use Lack\MailAutomation\Analysis\ConversationScope;
 use Lack\MailAutomation\Analysis\ConversationStore;
 use Lack\MailAutomation\Analysis\MailActionMatcher;
-use Lack\MailAutomation\Analysis\AnalyzedMail;
-use Lack\MailAutomation\Analysis\ContentAnalysis;
-use Lack\MailAutomation\Analysis\MailSummary;
 use Lack\MailAutomation\Attributes\OnMailAction;
+use Lack\MailAutomation\Content\MailContent;
+use Lack\MailAutomation\Content\MailSummary;
 use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
 use Lack\MailAutomation\MailContext;
-use Phore\AiHarness\AiContext;
+use Phore\AiHarness\Content\AiContent;
+use Phore\AiHarness\Content\AiMarkdown;
 use Phore\MailClient\Email;
 use PHPUnit\Framework\TestCase;
 
@@ -28,13 +28,17 @@ use PHPUnit\Framework\TestCase;
 )]
 final class GuardOnlyAction
 {
-    public static function accepts(AnalyzedMail $mail, MailContext $context): bool
-    {
+    public static function accepts(
+        MailContent $mail,
+        MailContext $context,
+    ): bool {
         return true;
     }
 
-    public function __invoke(AnalyzedMail $mail, MailContext $context): MailAction
-    {
+    public function __invoke(
+        MailContent $mail,
+        MailContext $context,
+    ): MailAction {
         return MailActions::complete();
     }
 }
@@ -42,8 +46,10 @@ final class GuardOnlyAction
 #[OnMailAction(condition: 'The current message asks for a profile update.')]
 final class AiConditionAction
 {
-    public function __invoke(AnalyzedMail $mail, MailContext $context): MailAction
-    {
+    public function __invoke(
+        MailContent $mail,
+        MailContext $context,
+    ): MailAction {
         return MailActions::complete();
     }
 }
@@ -53,8 +59,11 @@ final class MemoryConversationStore implements ConversationStore
     public array $metadata = [];
     public array $fileData = [];
 
-    public function get(string $scopeId, string $key, mixed $default = null): mixed
-    {
+    public function get(
+        string $scopeId,
+        string $key,
+        mixed $default = null,
+    ): mixed {
         return $this->metadata[$scopeId][$key] ?? $default;
     }
 
@@ -68,13 +77,19 @@ final class MemoryConversationStore implements ConversationStore
         return $this->metadata[$scopeId] ?? [];
     }
 
-    public function getFile(string $scopeId, string $name): ?ConversationFile
-    {
+    public function getFile(
+        string $scopeId,
+        string $name,
+    ): ?ConversationFile {
         return $this->fileData[$scopeId][$name] ?? null;
     }
 
-    public function putFile(string $scopeId, string $name, string $content, ?string $mediaType = null): ConversationFile
-    {
+    public function putFile(
+        string $scopeId,
+        string $name,
+        string $content,
+        ?string $mediaType = null,
+    ): ConversationFile {
         return $this->fileData[$scopeId][$name] = new ConversationFile(
             $name,
             $content,
@@ -103,9 +118,15 @@ final class AiMailActionsTest extends TestCase
 {
     public function testClassLevelActionsAndStaticGuardAreRegistered(): void
     {
-        $matcher = new MailActionMatcher([new GuardOnlyAction(), new AiConditionAction()]);
+        $matcher = new MailActionMatcher([
+            new GuardOnlyAction(),
+            new AiConditionAction(),
+        ]);
 
-        self::assertSame([Folder::Inbox, Folder::Inbox], $matcher->folders());
+        self::assertSame(
+            [Folder::Inbox, Folder::Inbox],
+            $matcher->folders(),
+        );
     }
 
     public function testConversationScopeStoresMetadataAndFilesThroughInterface(): void
@@ -114,37 +135,44 @@ final class AiMailActionsTest extends TestCase
         $scope = new ConversationScope('applicant:test@example.org', $store);
 
         $scope->set('stage', 'profile');
-        $file = $scope->putFile('profile.md', '# Profile', 'text/markdown');
+        $file = $scope->putFile(
+            'profile.md',
+            '# Profile',
+            'text/markdown',
+        );
 
         self::assertSame('profile', $scope->get('stage'));
         self::assertTrue($scope->hasFile('profile.md'));
-        self::assertSame('# Profile', $scope->getFile('profile.md')?->content);
-        self::assertSame($file->modifiedAt, $scope->fileModifiedAt('profile.md'));
+        self::assertSame(
+            '# Profile',
+            $scope->getFile('profile.md')?->content,
+        );
+        self::assertSame(
+            $file->modifiedAt,
+            $scope->fileModifiedAt('profile.md'),
+        );
         self::assertSame(9, $scope->files()['profile.md']->size);
     }
 
-    public function testMailAndConversationPromptsExposeSchemaAndData(): void
+    public function testMailContentIsAiContentWithSummaryAndAttachments(): void
     {
-        $current = $this->analyzedMail();
+        $mail = $this->mailContent();
 
-        $mailPrompt = $current->prompt('incomingEmail');
-        self::assertSame('incomingEmail', $mailPrompt->alias());
-        self::assertSame('object', $mailPrompt->jsonSchema()['type']);
-        self::assertSame('Need help', $mailPrompt->data()['subject']);
-        self::assertSame('Current body', $mailPrompt->data()['content']);
+        self::assertInstanceOf(AiContent::class, $mail);
+        self::assertSame('Need help', $mail->subject);
+        self::assertSame('Current message', $mail->getSummary());
+        self::assertCount(2, $mail->conversationSummary()['messages']);
 
-        $conversation = $current->conversationPrompt();
-        self::assertSame('conversation', $conversation->alias());
-        self::assertSame('object', $conversation->jsonSchema()['type']);
-        self::assertCount(2, $conversation->data()['messages']);
-        self::assertSame('Previous body', $conversation->data()['messages'][0]['content']);
-        self::assertSame('Current body', $conversation->data()['messages'][1]['content']);
-
-        $context = new AiContext(prompts: [$conversation]);
-        $current->ai_set_context($context);
-        self::assertSame($context, $current->ai_get_context());
-        self::assertSame($current, $current->ai_set_checkpoint('analyzed'));
-        self::assertSame($current, $current->ai_rollback('analyzed'));
+        $attachment = $mail->getAttachments()[0];
+        self::assertSame('cv.md', $attachment->fileName);
+        self::assertSame(
+            $attachment,
+            $mail->ai_get_content_by_id($attachment->getId()),
+        );
+        self::assertSame(
+            $mail,
+            $mail->ai_get_content_by_id($mail->getId()),
+        );
     }
 
     public function testActionNeedsConditionOrGuard(): void
@@ -154,7 +182,7 @@ final class AiMailActionsTest extends TestCase
         new OnMailAction();
     }
 
-    private function analyzedMail(): AnalyzedMail
+    private function mailContent(): MailContent
     {
         $store = new MemoryConversationStore();
         $scope = new ConversationScope('thread-1', $store);
@@ -192,13 +220,24 @@ final class AiMailActionsTest extends TestCase
             attachments: [],
             complete: true,
         );
+        $attachment = AiMarkdown::fromRaw(
+            '# CV',
+            fileName: 'cv.md',
+            id: 'attachment:current:1',
+            aliases: ['cv.md'],
+        );
 
-        return new AnalyzedMail(
-            original: (new Email(from: 'user@example.org', to: 'me@example.org', subject: 'Need help'))
-                ->withMarkdown('Current body'),
-            analysis: new ContentAnalysis('Current message', 'Current body'),
+        return new MailContent(
+            original: (
+                new Email(
+                    from: 'user@example.org',
+                    to: 'me@example.org',
+                    subject: 'Need help',
+                )
+            )->withMarkdown('Current body'),
             metadata: $current,
-            attachments: [],
+            attachments: [$attachment],
+            conversationAttachments: [$attachment],
             history: [$previous],
             missingReferences: [],
             conversation: $scope,

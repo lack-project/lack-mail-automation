@@ -1,17 +1,25 @@
 # Lack Mail Automation
 
-Stateful mail automation for PHP 8.5 on top of `phore/mail-client`. This package owns durable automation state, rules, contact identity, application metadata and processing semantics. The mail client remains the stateless IMAP boundary.
+Stateful mail automation for PHP 8.5 on top of `phore/mail-client`. This
+package owns durable automation state, rules, contact identity, application
+metadata and processing semantics. The mail client remains the stateless IMAP
+boundary.
 
-## Content-driven analysis and action matching
+## AI-native mail content and action matching
 
 For new workflows, start with
-[`examples/07-ai-classification.php`](examples/07-ai-classification.php) and
-[`docs/direct-mail-actions.md`](docs/direct-mail-actions.md).
+[`examples/07-mail-content-actions.php`](examples/07-mail-content-actions.php)
+and [`docs/direct-mail-actions.md`](docs/direct-mail-actions.md).
 
-There is deliberately no semantic mail/attachment classification type system.
-`MailAnalyzer` extracts supported attachments, summarizes them, and stores the
-complete observed mail body history. The business state is the conversation
-itself.
+`MailAnalyzer` returns `MailContent`. The object extends the AI Harness
+`AiContent` abstraction and owns the context used by the matcher and by the
+selected business action.
+
+The context starts with a compact chronological summary. Complete historic mail
+bodies and supported current/historic attachments remain available as AI
+Harness content objects in the same context. Attachments are not classified by
+LACK; the AI Harness factory returns `AiImage`, `AiMarkdown`, `AiText`
+or another `AiDocument` specialization where possible.
 
 Prefer one invokable class per business action:
 
@@ -21,15 +29,11 @@ Prefer one invokable class per business action:
 )]
 final class ProfileAction
 {
-    public function __invoke(AnalyzedMail $mail, MailContext $context): MailAction
+    public function __invoke(MailContent $mail, MailContext $context): MailAction
     {
-        $scope = $mail->scopeFor('applicant:' . strtolower($mail->from[0]));
-        $profile = $scope->getFile('profile.md');
-
-        // Generate the new profile from the full conversation and optional file.
-        $scope->putFile('profile.md', $newProfile, 'text/markdown');
-
-        return $mail->reply('Your profile draft is ready.');
+        return $mail->ai_reply(
+            new PromptFile(__DIR__ . '/_prompts/reply.md'),
+        );
     }
 }
 ```
@@ -50,25 +54,48 @@ $automation->addMailActions([
 ]);
 ```
 
-### Deterministic `when`, then AI condition
+`OnMailAction::condition` is evaluated against the shared `MailContent`
+context. An optional deterministic `when` guard remains available for cases
+where an application intentionally needs one, but semantic routing should
+normally stay in the AI condition.
 
-`when` is optional and only a deterministic pre-filter. It always runs before
-AI. It can be a public method name on the action object or a static callable
-array such as `[MetaLead::class, 'isSource']`. PHP attributes cannot contain
-closures.
+### Attachments and content queries
 
-When `condition` is also present, the action is offered to the AI only after
-the guard passes. Without `condition`, one successful guard selects that action
-directly. Multiple simultaneous guard-only matches are rejected as ambiguous.
+Current mail attachments are returned as AI Harness documents:
 
-The AI sees the complete chronological observed mail bodies, attachment
-summaries, missing-reference information and the current conversation-scope
-inventory. It chooses at most one registered action. It does not call arbitrary
-methods or tools.
+```php
+foreach ($mail->getAttachments() as $document) {
+    $text = $document->extractText();
+}
+```
+
+Current and historical content can also be selected semantically from the bound
+context:
+
+```php
+$documents = $mail->ai_query_content(
+    'Which document is the CV requested in the current conversation?',
+);
+
+$cv = $documents->first();
+```
+
+### Mail generation
+
+`MailContent` adds mail-specific operations to the inherited AI context API:
+
+- `ai_reply()` generates a reply;
+- `ai_mail()` generates a new mail;
+- `ai_forward()` generates a forward-style mail;
+- `reply()` schedules a direct reply and accepts `AiDocument` attachments.
+
+For `ai_mail()`, applications can provide a fixed recipient or pass `null`
+when a trusted business prompt should derive the recipient from the
+conversation. The generated address is syntax-validated before scheduling.
 
 ### Conversation scopes
 
-Every `AnalyzedMail` exposes `scope()` for the current mail thread and
+Every `MailContent` exposes `scope()` for the current thread and
 `scopeFor($id)` for an application-defined recipient/customer scope spanning
 several threads.
 
@@ -81,50 +108,11 @@ $scope->putFile('profile.md', $markdown, 'text/markdown');
 $scope->hasFile('profile.md');
 $scope->fileModifiedAt('profile.md');
 $scope->getFile('profile.md')?->content;
-$scope->files();
 ```
 
-`ConversationStore` is the persistence interface. The default
-`AutomationStorageConversationStore` uses the existing `AutomationStorage`.
-With standard `SqliteStorage`, scope metadata and file bytes therefore live in
-the same SQLite database. A custom `ConversationStore` can be passed to
-`MailAnalyzer` for another backend.
-
-### Mail and attachment access
-
-`AnalyzedMail::getContent()` returns the current decoded mail text.
-`getHistory()` returns chronological `MailSummary` objects whose `content`
-contains the full observed decoded mail body. `routingContext()` combines that
-history with attachment summaries and the scope snapshot.
-
-For AI calls, prefer the schema-backed helpers instead of rebuilding
-`StructPrompt` arrays manually:
-
-```php
-$mailPrompt = $mail->prompt(alias: 'incomingEmail');
-$conversation = $mail->conversationPrompt();
-
-return $mail->ai_answer(
-    new PromptFile(__DIR__ . '/_prompt/answer.md'),
-    $aiOptions,
-);
-```
-
-`prompt()` and `conversationPrompt()` return native AI Harness `StructPrompt`
-instances whose JSON schema is generated from LACK-owned prompt DTOs. Mail data
-remains untrusted by default. `ai_answer()` appends the complete
-conversation automatically and returns `actionRequired()` when the generated
-structured result reports insufficient or contradictory context.
-
-Attachments are analyzed but not classified. `getAttachments()` returns all
-attachments; each exposes filename, media type, summary, extracted content,
-original bytes and `getRawFile()`. A selected action can decide which document
-is the CV from this evidence instead of depending on a pre-assigned enum.
-
-`reply()`, `sendReply()` and `sendMail()` only schedule mail operations.
-Draft/send and dry-run semantics remain controlled by `MailAutomation`.
-Technical `processed`, `error` and `actionRequired` flags remain engine
-mechanics; they are not semantic conversation state.
+`ConversationStore` is the persistence interface. The default implementation
+uses the existing `AutomationStorage`, so the standard SQLite backend keeps
+scope metadata and file bytes in the same database.
 
 ## Boundary
 
