@@ -67,12 +67,12 @@ final class MailAutomation
     public function __construct(
         private MailClient $client,
         PDO|AutomationStorage|string $storage,
-        Folder|string $inboxFolder = Folder::Inbox,
-        Folder|string $sentFolder = Folder::Sent,
         ?ContactResolver $contactResolver = null,
         private ?DraftSender $sender = null,
         ?PhoreLogger $logger = null,
         private ?Analysis\MailAnalyzer $mailAnalyzer = null,
+        Folder|string $inboxFolder = Folder::Inbox,
+        Folder|string $sentFolder = Folder::Sent,
     ) {
         $this->logger = ($logger ?? PhoreLogger::GetInstance())->scope('mailAutomation');
         $this->inboxFolder = $this->resolveFolder($inboxFolder);
