@@ -134,6 +134,30 @@ final class ScheduledMailActions implements MailAction
      * @example return MailActions::schedule()->sendReply('Revised CV attached.', [$cv]);
      * @see \Lack\MailAutomation\Analysis\AnalyzedMail::reply()
      */
+    /**
+     * Schedule a typed AI mail draft for delivery.
+     *
+     * @example return $mail->ai_reply($prompt)->send();
+     * @see \Lack\MailAutomation\Content\AiMailDraft::send()
+     */
+    public function sendAiMailDraft(
+        \Lack\MailAutomation\Content\AiMailDraft $draft,
+    ): self {
+        return $this->queue('sendAiMailDraft', [$draft]);
+    }
+
+    /**
+     * Save a typed AI mail draft without sending it.
+     *
+     * @example return $mail->ai_reply($prompt)->draft();
+     * @see \Lack\MailAutomation\Content\AiMailDraft::draft()
+     */
+    public function saveAiMailDraft(
+        \Lack\MailAutomation\Content\AiMailDraft $draft,
+    ): self {
+        return $this->queue('saveAiMailDraft', [$draft]);
+    }
+
     public function sendReply(string $markdown, array $attachments = []): self
     {
         foreach ($attachments as $attachment) {
