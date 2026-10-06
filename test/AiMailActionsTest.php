@@ -118,8 +118,8 @@ final class AiMailActionsTest extends TestCase
 
         $action = $draft->send();
 
-        self::assertSame('sendReply', $action->items()[0]['type']);
-        self::assertSame('Hallo Welt', $action->items()[0]['args'][0]);
+        self::assertSame('sendAiMailDraft', $action->items()[0]['type']);
+        self::assertSame($draft, $action->items()[0]['args'][0]);
     }
 
     public function testAiMailDraftAttachmentKeepsMailIdentity(): void
@@ -144,7 +144,8 @@ final class AiMailActionsTest extends TestCase
 
         $action = $delivery->send();
 
-        self::assertSame('sendMail', $action->items()[0]['type']);
+        self::assertSame('sendAiMailDraft', $action->items()[0]['type']);
+        self::assertSame($delivery, $action->items()[0]['args'][0]);
         self::assertSame('mail-1', $draft->getId());
     }
 
