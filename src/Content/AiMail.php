@@ -313,7 +313,6 @@ readonly class AiMail extends AiContent
             mode: AiMailDraft::MODE_REPLY,
             answerable: $draft->answerable,
             reason: $draft->reason,
-            context: $this->ai_get_context(),
             id: $id,
             aliases: $aliases,
             instructions: $instructions,
@@ -379,10 +378,9 @@ readonly class AiMail extends AiContent
             markdown: $draft->markdown,
             mode: AiMailDraft::MODE_MAIL,
             to: $resolvedTo,
-            subject: $resolvedSubject,
+            draftSubject: $resolvedSubject,
             answerable: $answerable,
             reason: $draft->reason,
-            context: $this->ai_get_context(),
             id: $id,
             aliases: $aliases,
             instructions: $instructions,
@@ -392,7 +390,7 @@ readonly class AiMail extends AiContent
     /**
      * Generate a forward-style mail with an explicit recipient.
      *
-     * Attachments are added explicitly on the returned AiMail via attach().
+     * Attachments are added explicitly on the returned AiMailDraft via attach().
      *
      * @param string|array $to Forward recipient.
      * @param string|PromptType|array<int,string|PromptType> $prompt Trusted application prompt.
@@ -429,10 +427,9 @@ readonly class AiMail extends AiContent
             markdown: $draft->rawData,
             mode: AiMailDraft::MODE_FORWARD,
             to: $draft->to,
-            subject: $draft->subject,
+            draftSubject: $draft->draftSubject,
             answerable: $draft->answerable,
             reason: $draft->reason,
-            context: $this->ai_get_context(),
             id: $draft->getId(),
             aliases: $draft->getAliases(),
             instructions: $draft->getInstructions(),
