@@ -3,6 +3,9 @@ declare(strict_types=1);
 namespace Lack\MailAutomation;
 
 use Lack\MailAutomation\Attributes\OnFolderAutomation;
+use Lack\MailAutomation\Attributes\OnMailAction;
+use Lack\MailAutomation\Content\AiMail;
+use Lack\MailAutomation\Content\AiMailDraft;
 use PDO;
 use Phore\Log\PhoreLogger;
 use Phore\MailClient\Email;
@@ -58,16 +61,22 @@ final class MailAutomation
     /** @var array<string,true> Message-IDs handed off for the next run. */
     private array $deferred = [];
     private int $order = 0;
+    private string $inboxFolder;
+    private string $sentFolder;
 
     public function __construct(
         private MailClient $client,
         PDO|AutomationStorage|string $storage,
+        Folder|string $inboxFolder = Folder::Inbox,
+        Folder|string $sentFolder = Folder::Sent,
         ?ContactResolver $contactResolver = null,
         private ?DraftSender $sender = null,
         ?PhoreLogger $logger = null,
         private ?Analysis\MailAnalyzer $mailAnalyzer = null,
     ) {
         $this->logger = ($logger ?? PhoreLogger::GetInstance())->scope('mailAutomation');
+        $this->inboxFolder = $this->resolveFolder($inboxFolder);
+        $this->sentFolder = $this->resolveFolder($sentFolder);
         $this->automationFlags = array_replace(self::DEFAULT_AUTOMATION_FLAGS, $client->automationFlags());
         if (is_string($storage)) {
             if ($storage === '') { throw new \InvalidArgumentException('SQLite storage path must not be empty.'); }
@@ -158,6 +167,140 @@ final class MailAutomation
         return $this;
     }
 
+    /**
+     * Register one AI-routed mail action.
+     */
+    public function addMailAutomation(
+        object $action,
+        array $aiOptions = [],
+        bool $flagUnhandled = false,
+        int $maxContextBytes = 100_000,
+    ): self {
+        return $this->addMailActions(
+            [$action],
+            $aiOptions,
+            $flagUnhandled,
+            $maxContextBytes,
+            automationId: 'ai-mail-action:' . hash('sha256', $action::class),
+        );
+    }
+
+    /**
+     * Recursively load attributed action classes from a directory.
+     *
+     * Files are selected by filename pattern. Every concrete class declared in
+     * those files with an OnMailAction attribute is instantiated without
+     * constructor arguments and registered as one shared AI choice set.
+     */
+    public function scanAutomations(
+        string $directory,
+        string $pattern = '*Action.php',
+        array $aiOptions = [],
+        bool $flagUnhandled = false,
+        int $maxContextBytes = 100_000,
+    ): self {
+        if (!is_dir($directory)) {
+            throw new \InvalidArgumentException('Automation directory does not exist: ' . $directory);
+        }
+
+        $files = [];
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator(
+                $directory,
+                \FilesystemIterator::SKIP_DOTS,
+            ),
+        );
+        foreach ($iterator as $file) {
+            if (!$file->isFile() || !fnmatch($pattern, $file->getFilename())) {
+                continue;
+            }
+            $path = $file->getRealPath();
+            if ($path === false) {
+                continue;
+            }
+            $files[$path] = true;
+            require_once $path;
+        }
+
+        $actions = [];
+        foreach (get_declared_classes() as $class) {
+            $reflection = new \ReflectionClass($class);
+            $file = $reflection->getFileName();
+            $real = $file === false ? false : realpath($file);
+            if ($real === false || !isset($files[$real]) || $reflection->isAbstract()) {
+                continue;
+            }
+
+            $hasAction = $reflection->getAttributes(OnMailAction::class) !== [];
+            if (!$hasAction) {
+                foreach ($reflection->getMethods(\ReflectionMethod::IS_PUBLIC) as $method) {
+                    if ($method->getAttributes(OnMailAction::class) !== []) {
+                        $hasAction = true;
+                        break;
+                    }
+                }
+            }
+            if (!$hasAction) {
+                continue;
+            }
+
+            $constructor = $reflection->getConstructor();
+            if ($constructor !== null && $constructor->getNumberOfRequiredParameters() > 0) {
+                throw new \InvalidArgumentException(
+                    'Scanned mail action requires constructor arguments: ' . $class,
+                );
+            }
+            $actions[] = $reflection->newInstance();
+        }
+
+        if ($actions === []) {
+            throw new \InvalidArgumentException(
+                'No OnMailAction classes found in ' . $directory . ' matching ' . $pattern,
+            );
+        }
+
+        return $this->addMailActions(
+            $actions,
+            $aiOptions,
+            $flagUnhandled,
+            $maxContextBytes,
+            automationId: 'ai-mail-scan:' . hash('sha256', realpath($directory) . "\0" . $pattern),
+        );
+    }
+
+    /**
+     * Manually synchronize Sent before Inbox, matching the standard run order.
+     */
+    public function scanSent(
+        bool $processExistingOutgoing = false,
+        bool $dryRun = false,
+    ): RunReport {
+        $report = new RunReport();
+        $this->drainFolder(
+            $this->sentFolder,
+            true,
+            $processExistingOutgoing,
+            $dryRun,
+            $report,
+        );
+
+        return $report;
+    }
+
+    public function scanInbox(bool $dryRun = false): RunReport
+    {
+        $report = new RunReport();
+        $this->drainFolder(
+            $this->inboxFolder,
+            false,
+            false,
+            $dryRun,
+            $report,
+        );
+
+        return $report;
+    }
+
     public function addRules(object|callable|string $rules): self
     {
         if (is_string($rules) && function_exists($rules)) {
@@ -230,14 +373,22 @@ final class MailAutomation
         $report = new RunReport();
         $this->deferred = [];
         $this->logger->debug('Start run with {} registered automations', [count($this->rules)]);
-        $sent = Folder::Sent->resolve($this->client);
-        $folders = [$sent];
+        $folders = [$this->sentFolder, $this->inboxFolder];
         foreach ($this->rules as $rule) {
             $folder = $this->resolveFolder($rule->folder);
-            if (!in_array($folder, $folders, true)) { $folders[] = $folder; }
+            if (!in_array($folder, $folders, true)) {
+                $folders[] = $folder;
+            }
         }
+
         foreach ($folders as $folder) {
-            $this->drainFolder($folder, $folder === $sent, $processExistingOutgoing, $dryRun, $report);
+            $this->drainFolder(
+                $folder,
+                $folder === $this->sentFolder,
+                $processExistingOutgoing,
+                $dryRun,
+                $report,
+            );
         }
         $this->logger->debug('Run finished: {} processed, {} skipped, {} indexed sent', [$report->processed, $report->skipped, $report->indexedSent]);
         return $report;
@@ -352,7 +503,7 @@ final class MailAutomation
         }
     }
 
-    private function processMessage(Email $mail, string $folder, string $direction, bool $dryRun, RunReport $report, ?Content\MailContent $mailContent = null): void
+    private function processMessage(Email $mail, string $folder, string $direction, bool $dryRun, RunReport $report, ?Content\AiMail $mailContent = null): void
     {
         $messageId = $mail->messageId() ?? $mail->id() ?? 'unknown';
         $messageLog = $this->logger->scope('message')->withContext(['messageId' => $messageId, 'folder' => $folder, 'direction' => $direction]);
@@ -452,6 +603,21 @@ final class MailAutomation
                 case 'removeFlag':
                     $current = $this->client->removeFlag($current,$item['args'][0]);
                     break;
+                case 'sendAiMailDraft':
+                case 'saveAiMailDraft':
+                    /** @var AiMailDraft $draft */
+                    $draft = $item['args'][0];
+                    $outgoing = $this->buildAiMailDraft($current, $draft);
+                    $this->rememberAiMailDraft($draft, $outgoing);
+                    if ($item['type'] === 'saveAiMailDraft' || $this->sender === null) {
+                        $this->client->saveDraft($outgoing);
+                    } else {
+                        $this->sender->send($outgoing);
+                        if ($this->client->isAutomatic('answered')) {
+                            $current = $this->client->markAnswered($current);
+                        }
+                    }
+                    break;
                 case 'sendMail':
                     if ($this->sender === null) {
                         $this->client->saveDraft($item['args'][0]);
@@ -494,6 +660,71 @@ final class MailAutomation
             }
         }
         return [$current,$reprocess];
+    }
+
+    private function buildAiMailDraft(
+        Email $current,
+        AiMailDraft $draft,
+    ): Email {
+        if ($draft->mode === AiMailDraft::MODE_REPLY) {
+            $outgoing = $this->client->reply($current, $draft->getContent());
+        } else {
+            $recipient = $draft->recipient();
+            $subject = $draft->draftSubject;
+            if ($recipient === null || $recipient === [] || $subject === null || trim($subject) === '') {
+                throw new \InvalidArgumentException(
+                    'New and forwarded AI mail drafts require recipient and subject.',
+                );
+            }
+            $outgoing = (new Email(to: $recipient, subject: $subject))
+                ->withMarkdown($draft->getContent());
+        }
+
+        foreach ($draft->draftAttachments() as $attachment) {
+            if ($attachment->fileName === null) {
+                throw new \InvalidArgumentException(
+                    'AI mail draft attachment requires a filename.',
+                );
+            }
+            $outgoing = $outgoing->attach(
+                \Phore\MailClient\Attachment::fromBytes(
+                    $attachment->fileName,
+                    $attachment->contentType,
+                    $attachment->rawData,
+                ),
+            );
+        }
+
+        return $outgoing;
+    }
+
+    /**
+     * Persist content identity until the authoritative Sent copy is observed.
+     */
+    private function rememberAiMailDraft(
+        AiMailDraft $draft,
+        Email $outgoing,
+    ): void {
+        $recipients = array_map(
+            static fn ($address): string => strtolower($address->getAddress()),
+            [...$outgoing->to(), ...$outgoing->cc(), ...$outgoing->bcc()],
+        );
+        sort($recipients);
+
+        $this->storage->metadataSet(
+            'ai-outbound-draft',
+            $this->client->accountId(),
+            $draft->getId(),
+            [
+                'id' => $draft->getId(),
+                'aliases' => $draft->getAliases(),
+                'instructions' => $draft->getInstructions(),
+                'recipients' => $recipients,
+                'subject' => trim($outgoing->subject()),
+                'bodyHash' => hash('sha256', $outgoing->body()->text()),
+                'claimedMessageId' => null,
+            ],
+        );
     }
 
     /** @return list<Rule> */
