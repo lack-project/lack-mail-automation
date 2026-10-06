@@ -30,7 +30,7 @@ configured in the existing `phore/mail-client` mailbox YAML/JSON.
 
 ## CLI
 
-The package installs `vendor/bin/lack-mail-automation`:
+The package installs `vendor/bin/lack-mail-automation.php`:
 
 ```bash
 vendor/bin/lack-mail-automation.php run

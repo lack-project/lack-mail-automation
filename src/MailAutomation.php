@@ -690,7 +690,7 @@ final class MailAutomation
         }
     }
 
-    private function processMessage(Email $mail, string $folder, string $direction, bool $dryRun, RunReport $report, ?Content\AiMail $mailContent = null): void
+    private function processMessage(Email $mail, string $folder, string $direction, bool $dryRun, RunReport $report, ?Content\AiMail $mailContent = null, bool $ignoreBlockingFlags = false): void
     {
         $messageId = $mail->messageId() ?? $mail->id() ?? 'unknown';
         $messageLog = $this->logger->scope('message')->withContext(['messageId' => $messageId, 'folder' => $folder, 'direction' => $direction]);
