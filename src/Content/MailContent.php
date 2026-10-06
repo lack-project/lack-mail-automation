@@ -19,7 +19,6 @@ use Phore\AiHarness\PromptType\FilePrompt;
 use Phore\AiHarness\PromptType\PromptType;
 use Phore\MailClient\Attachment;
 use Phore\MailClient\Email;
-use UnexpectedValueException;
 
 final readonly class ResponseMailDraft
 {
@@ -522,26 +521,6 @@ final readonly class MailContent extends AiContent
         }
 
         return $sources;
-    }
-
-    /**
-     * @param null|callable(object,self):array<AiDocument> $callback
-     * @return list<AiDocument>
-     */
-    private function resolveGeneratedAttachments(?callable $callback, object $draft): array
-    {
-        if ($callback === null) {
-            return [];
-        }
-
-        $files = $callback($draft, $this);
-        if (!is_array($files)) {
-            throw new UnexpectedValueException(
-                'Generated mail attachment callback must return an array.',
-            );
-        }
-
-        return array_values($files);
     }
 
     /** @param list<AiDocument> $attachments @return list<Attachment> */
