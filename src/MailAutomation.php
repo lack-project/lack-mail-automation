@@ -63,6 +63,9 @@ final class MailAutomation
     private int $order = 0;
     private string $inboxFolder;
     private string $sentFolder;
+    private ?string $lockFile = null;
+    /** @var resource|null */
+    private $runLock = null;
 
     public function __construct(
         private MailClient $client,
@@ -88,6 +91,54 @@ final class MailAutomation
         $this->resolver = $contactResolver ?? new ReplyContactResolver();
         $this->resolver->bind($client, $this->storage);
         $this->logger->debug('Initialized mail automation for account {}', [$client->accountId()]);
+    }
+
+    /**
+     * Build the standard automation runtime from one application config.
+     *
+     * This method owns mailbox connection, analyzer setup, SQLite directory,
+     * action discovery and the process lock. Mailbox folders and automation
+     * flags are taken from phore/mail-client's MailboxConfig.
+     *
+     * @param MailAutomationConfig $config Application bootstrap configuration.
+     * @return self Ready-to-run automation.
+     *
+     * @example $automation = MailAutomation::fromConfig($config);
+     * @see MailAutomationConfig
+     */
+    public static function fromConfig(MailAutomationConfig $config): self
+    {
+        $mailbox = is_string($config->mailbox)
+            ? MailboxConfig::fromFile($config->mailbox)
+            : $config->mailbox;
+
+        $storageDirectory = dirname($config->storage);
+        if (!is_dir($storageDirectory)
+            && !mkdir($storageDirectory, 0775, true)
+            && !is_dir($storageDirectory)) {
+            throw new \RuntimeException(
+                'Could not create mail automation storage directory: '
+                . $storageDirectory,
+            );
+        }
+
+        $automation = new self(
+            client: $mailbox->connect(),
+            storage: $config->storage,
+            logger: $config->logger,
+            mailAnalyzer: new Analysis\MailAnalyzer(
+                aiOptions: $config->aiOptions,
+            ),
+        );
+        $automation->lockFile = $config->lockFile ?? $config->storage . '.lock';
+        $automation->scanAutomations(
+            $config->actionsDirectory,
+            $config->actionPattern,
+            aiOptions: $config->aiOptions,
+            flagUnhandled: $config->flagUnhandled,
+        );
+
+        return $automation;
     }
 
     public function storage(): AutomationStorage { return $this->storage; }
@@ -368,30 +419,166 @@ final class MailAutomation
         return 'closure-' . ($this->order + 1);
     }
 
-    public function run(bool $processExistingOutgoing = false, bool $dryRun = false): RunReport
-    {
-        $report = new RunReport();
-        $this->deferred = [];
-        $this->logger->debug('Start run with {} registered automations', [count($this->rules)]);
-        $folders = [$this->sentFolder, $this->inboxFolder];
-        foreach ($this->rules as $rule) {
-            $folder = $this->resolveFolder($rule->folder);
-            if (!in_array($folder, $folders, true)) {
-                $folders[] = $folder;
+    /**
+     * Process the configured folders using the standard Sent -> Inbox cycle.
+     *
+     * Configuration-created instances acquire their process lock internally.
+     * Dry-run never persists cursors/status flags or executes business actions.
+     *
+     * @param bool $processExistingOutgoing Process initial Sent baseline actions.
+     * @param bool $dryRun Disable persistent side effects.
+     * @return RunReport Aggregated processing result.
+     *
+     * @example $report = $automation->run(dryRun: true);
+     * @see runMail()
+     */
+    public function run(
+        bool $processExistingOutgoing = false,
+        bool $dryRun = false,
+    ): RunReport {
+        $this->acquireRunLock();
+
+        try {
+            $report = new RunReport();
+            $this->deferred = [];
+            $this->logger->debug(
+                'Start run with {} registered automations',
+                [count($this->rules)],
+            );
+
+            $folders = [$this->sentFolder, $this->inboxFolder];
+            foreach ($this->rules as $rule) {
+                $folder = $this->resolveFolder($rule->folder);
+                if (!in_array($folder, $folders, true)) {
+                    $folders[] = $folder;
+                }
             }
+
+            foreach ($folders as $folder) {
+                $this->drainFolder(
+                    $folder,
+                    $folder === $this->sentFolder,
+                    $processExistingOutgoing,
+                    $dryRun,
+                    $report,
+                );
+            }
+
+            $this->logger->debug(
+                'Run finished: {} processed, {} skipped, {} indexed sent',
+                [$report->processed, $report->skipped, $report->indexedSent],
+            );
+
+            return $report;
+        } finally {
+            $this->releaseRunLock();
+        }
+    }
+
+    /**
+     * Reprocess exactly one mail-client message reference.
+     *
+     * Cursor state is not advanced. Existing processed/error/actionRequired
+     * flags do not block the explicit retry; normal success/error flag handling
+     * still applies unless dry-run is active.
+     *
+     * @param string $mailId Encoded phore/mail-client message reference.
+     * @param bool $dryRun Disable persistent side effects.
+     * @return RunReport Result for the single message.
+     *
+     * @example $report = $automation->runMail($id, dryRun: true);
+     * @see MailClient::peek()
+     */
+    public function runMail(string $mailId, bool $dryRun = false): RunReport
+    {
+        if (trim($mailId) === '') {
+            throw new \InvalidArgumentException('Mail ID must not be empty.');
         }
 
-        foreach ($folders as $folder) {
-            $this->drainFolder(
-                $folder,
-                $folder === $this->sentFolder,
-                $processExistingOutgoing,
-                $dryRun,
-                $report,
+        $this->acquireRunLock();
+
+        try {
+            $report = new RunReport();
+            $mail = $this->client->peek($mailId);
+            $ownAddress = $this->client->fromAddress()?->getAddress();
+            $outgoing = count($mail->from()) === 1
+                && $mail->from()[0]->getAddress() === $ownAddress;
+            $folder = $outgoing ? $this->sentFolder : $this->inboxFolder;
+            $direction = $outgoing ? 'outgoing' : 'incoming';
+
+            if ($outgoing) {
+                $this->indexSent($mail, $folder, $report);
+            }
+
+            $content = $this->mailAnalyzer?->analyze(
+                $mail,
+                $this->client,
+                $this->storage,
+                $direction,
+                persist: !$dryRun,
+            );
+
+            try {
+                $this->processMessage(
+                    $mail,
+                    $folder,
+                    $direction,
+                    $dryRun,
+                    $report,
+                    $content,
+                    ignoreBlockingFlags: true,
+                );
+            } catch (\Throwable $error) {
+                if (!$dryRun) {
+                    $this->client->addFlag(
+                        $mail,
+                        $this->automationFlags['error'],
+                    );
+                }
+                $report->addError($folder, $mail->messageId(), $error);
+            }
+
+            return $report;
+        } finally {
+            $this->releaseRunLock();
+        }
+    }
+
+    private function acquireRunLock(): void
+    {
+        if ($this->lockFile === null) {
+            return;
+        }
+        if ($this->runLock !== null) {
+            throw new \LogicException('Mail automation run lock is already held.');
+        }
+
+        $handle = @fopen($this->lockFile, 'c');
+        if ($handle === false) {
+            throw new \RuntimeException(
+                'Could not open mail automation lock file: ' . $this->lockFile,
             );
         }
-        $this->logger->debug('Run finished: {} processed, {} skipped, {} indexed sent', [$report->processed, $report->skipped, $report->indexedSent]);
-        return $report;
+        if (!flock($handle, LOCK_EX | LOCK_NB)) {
+            fclose($handle);
+            throw new \RuntimeException(
+                'Another mail automation process is already running: '
+                . $this->lockFile,
+            );
+        }
+
+        $this->runLock = $handle;
+    }
+
+    private function releaseRunLock(): void
+    {
+        if ($this->runLock === null) {
+            return;
+        }
+
+        flock($this->runLock, LOCK_UN);
+        fclose($this->runLock);
+        $this->runLock = null;
     }
 
     private function drainFolder(string $folder, bool $isSent, bool $processExistingOutgoing, bool $dryRun, RunReport $report): void
@@ -508,7 +695,7 @@ final class MailAutomation
         $messageId = $mail->messageId() ?? $mail->id() ?? 'unknown';
         $messageLog = $this->logger->scope('message')->withContext(['messageId' => $messageId, 'folder' => $folder, 'direction' => $direction]);
         $blockingFlag = $this->blockingFlag($mail);
-        if ($blockingFlag !== null) {
+        if (!$ignoreBlockingFlags && $blockingFlag !== null) {
             $report->skipped++;
             $messageLog->debug('Skip message because blocking automation flag {} is set', [$blockingFlag]);
             return;

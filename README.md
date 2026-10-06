@@ -1,77 +1,54 @@
 # Lack Mail Automation
 
-AI-native, stateful mail automation for PHP 8.5 on top of
-`phore/mail-client` and `phore/ai-harness`.
+AI-native mailbox automation on top of `phore/mail-client` and
+`phore/ai-harness`.
 
-The normal application entry point is `MailAutomation`. It owns the mailbox
-cycle, durable state and AI-routed actions. A standard run always observes
-**Sent first and Inbox second**, so action selection sees the latest outgoing
-conversation state before processing new inbound mail.
+The normal application surface is one `MailAutomation` object. Connection,
+storage, locking, Sent/Inbox synchronization, automation flags, analysis and
+action discovery belong to the library rather than to application `run.php`
+files.
 
-## Minimal setup
+## Bootstrap
 
 ```php
 <?php
 
-use Lack\MailAutomation\Analysis\MailAnalyzer;
-use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\MailAutomation;
-use Phore\MailClient\MailboxConfig;
+use Lack\MailAutomation\MailAutomationConfig;
 
-$client = MailboxConfig::fromFile($argv[1])->connect();
-
-$automation = new MailAutomation(
-    client: $client,
-    storage: $argv[2],
-    inboxFolder: Folder::Inbox,
-    sentFolder: Folder::Sent,
-    mailAnalyzer: new MailAnalyzer(),
+return MailAutomation::fromConfig(
+    new MailAutomationConfig(
+        mailbox: dirname(__DIR__) . '/mailclient.yaml',
+        storage: __DIR__ . '/run/mail-automation.sqlite',
+        actionsDirectory: __DIR__ . '/actions',
+    ),
 );
-
-$automation->scanAutomations(
-    __DIR__ . '/actions',
-    '*Action.php',
-);
-
-$report = $automation->run();
 ```
 
-`scanAutomations()` recursively loads matching files and registers every
-concrete class carrying `#[OnMailAction(...)]`. For dependency-injected actions,
-use `addMailAutomation()` or `addMailActions()` explicitly instead.
+Mailbox folders and the `processed`, `error` and `actionRequired` flags are
+configured in the existing `phore/mail-client` mailbox YAML/JSON.
 
-## AiMail and AiMailDraft
+## CLI
 
-`MailAnalyzer` returns `AiMail`. It represents an observed mailbox message and
-is itself AI Harness `AiContent`: it has an ID, aliases, instructions, the
-conversation summary, previous mails and current/historical attachments.
+The package installs `vendor/bin/lack-mail-automation`:
 
-AI generation returns `AiMailDraft`. A draft **extends `AiMail`**, so it
-retains the same AI-content capabilities, but only the draft type exposes
-outbound mutation/delivery operations:
-
-```php
-$draft = $mail->ai_forward('office@example.org', $prompt)
-    ->setSubject('Lebenslauf')
-    ->attach($pdf);
-
-return $draft->send();
+```bash
+vendor/bin/lack-mail-automation run
+vendor/bin/lack-mail-automation run --dry-run
+vendor/bin/lack-mail-automation run --mail-id '<mail-client-id>'
 ```
 
-Available draft operations include `setRecipient()`, `setSubject()`,
-`setText()`, `attach()`, `draft()` and `send()`. The setters are fluent
-and return a new typed draft. Reply recipients and subjects remain derived
-from the source mail so threading information is preserved; those two setters
-are therefore only valid for new/forward drafts.
+The default bootstrap is `automail/bootstrap.php`; use `--bootstrap` only
+when the application keeps it elsewhere.
 
-Sending does not directly become conversation history. The draft identity
-(ID, aliases and instructions) is persisted as pending outbound metadata. The
-authoritative message enters history when the Sent folder is scanned. The
-linker prefers an exact recipient/subject/body match and accepts a unique
-recipient/subject match so manual body edits can still retain the draft
-identity.
+A normal run observes Sent before Inbox, then any additional folders required
+by registered actions. The process lock, cursor handling and status flags are
+internal. `--mail-id` explicitly retries one message without advancing a
+folder cursor.
 
-## AI-routed actions
+## Actions
+
+Actions are discovered recursively from `actionsDirectory`:
 
 ```php
 #[OnMailAction(
@@ -89,20 +66,10 @@ final class RequestCvDetailsAction
 }
 ```
 
-`condition` is the complete semantic routing rule. `priority` is only a
-tie-breaker: a higher number wins when several conditions fit equally well; it
-never makes a non-matching action valid.
+Higher numeric `priority` only resolves overlap between otherwise matching
+conditions.
 
-## Manual cycle control
-
-The standard `run()` order is fixed. Integrations that need explicit control
-can call `scanSent()` and `scanInbox()` separately. This is useful for
-maintenance jobs and tests, not for normal application boilerplate.
-
-## Advanced APIs
-
-Legacy folder rules, contacts, tags, metadata bags, manual flags, managed-folder
-moves and filtered contact history remain available for specialized workflows.
-They are not required for the normal conversation-driven AI action flow.
-
-See the numbered `examples/` directory for the recommended API sequence.
+Generated outbound content is `AiMailDraft extends AiMail`. Drafts provide
+`setRecipient()`, `setSubject()`, `setText()`, `attach()`, `draft()`
+and `send()`; Reply recipients/subjects remain derived from their source mail
+to preserve threading.

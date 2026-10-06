@@ -1,94 +1,40 @@
-# AI-routed mail actions
+# Mail automation application flow
 
-## 1. Start with MailAutomation
-
-`MailAutomation` is the facade. It owns the connection, durable storage,
-action registration and the mailbox cycle.
+## 1. Bootstrap one MailAutomation
 
 ```php
-$automation = new MailAutomation(
-    client: $client,
-    storage: '/var/lib/app/mail.sqlite',
-    inboxFolder: Folder::Inbox,
-    sentFolder: Folder::Sent,
-    mailAnalyzer: new MailAnalyzer(aiOptions: $aiOptions),
+<?php
+
+use Lack\MailAutomation\MailAutomation;
+use Lack\MailAutomation\MailAutomationConfig;
+
+return MailAutomation::fromConfig(
+    new MailAutomationConfig(
+        mailbox: dirname(__DIR__) . '/mailclient.yaml',
+        storage: __DIR__ . '/run/mail-automation.sqlite',
+        actionsDirectory: __DIR__ . '/actions',
+    ),
 );
-
-$automation->scanAutomations(
-    __DIR__ . '/actions',
-    '*Action.php',
-    aiOptions: $aiOptions,
-);
-
-$automation->run();
 ```
 
-The standard run order is always Sent, then Inbox. Outgoing messages become
-conversation state only when observed in Sent.
+No connection, lock, cursor, folder-sync or status-flag code belongs in this
+application file.
 
-## 2. Declare actions
+## 2. Run it
 
-```php
-#[OnMailAction(
-    condition: 'This is the first reply to our initial applicant mail.',
-    priority: 50,
-)]
-final class RequestDetailsAction
-{
-    public function __invoke(AiMail $mail): MailAction
-    {
-        return $mail->ai_reply(
-            new PromptFile(__DIR__ . '/request-details.md'),
-        )->send();
-    }
-}
+```bash
+vendor/bin/lack-mail-automation run
 ```
 
-Higher `priority` means stronger precedence only when several complete
-conditions match.
+Use `--dry-run` for analysis without persistence or delivery. Use
+`--mail-id '<id>'` to retry exactly one message.
 
-## 3. Work with drafts
+## 3. Add actions by adding files
 
-Observed messages are `AiMail`. Generated outbound mail is `AiMailDraft`,
-which extends `AiMail`.
+Every concrete `*Action.php` class below `actionsDirectory` carrying
+`#[OnMailAction(...)]` is discovered automatically. Application code does not
+maintain a parallel registry.
 
-```php
-$draft = $mail->ai_forward(
-    'office@example.org',
-    new PromptFile(__DIR__ . '/forward.md'),
-);
-
-$draft = $draft
-    ->setSubject('New CV')
-    ->attach($pdf);
-
-return $draft->send();
-```
-
-Use `draft()` instead of `send()` to save without delivery. A draft keeps AI
-content identity and can still be queried or referenced before delivery.
-
-## 4. Sent is authoritative
-
-Before delivery, the automation stores the draft's ID, aliases and instructions
-as pending metadata. On the next Sent scan, the final outgoing message is
-analyzed and that identity is attached to the observed `AiMail`. This avoids
-maintaining a second conversation history and includes mail changed manually
-before sending.
-
-## 5. Manual registration and scanning
-
-Dependency-injected actions can be registered explicitly:
-
-```php
-$automation->addMailAutomation(new RequestDetailsAction($service));
-```
-
-Manual maintenance flows can synchronize the folders separately:
-
-```php
-$automation->scanSent();
-$automation->scanInbox();
-```
-
-Normal application code should prefer `run()`.
+Mailbox Sent/Inbox folder names and automation keywords are configured in the
+mailbox configuration. The library performs the synchronization and flag
+handling.
