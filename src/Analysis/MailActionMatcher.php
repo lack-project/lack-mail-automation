@@ -19,7 +19,7 @@ use UnexpectedValueException;
 
 final class MailActionMatcher
 {
-    /** @var array<string,array{condition:?string,handle:\Closure,guard:?\Closure,folder:Folder|string}> */
+    /** @var array<string,array{condition:string,handle:\Closure,folder:Folder|string}> */
     private array $actions = [];
 
     public function __construct(
@@ -124,34 +124,11 @@ final class MailActionMatcher
             );
         }
 
-        $guard = null;
-        if (is_string($config->when)) {
-            $reflection = new ReflectionObject($object);
-            if (
-                !$reflection->hasMethod($config->when)
-                || !$reflection->getMethod($config->when)->isPublic()
-            ) {
-                throw new InvalidArgumentException(
-                    'Unknown public eligibility method: ' . $config->when,
-                );
-            }
-            $guard = \Closure::fromCallable([$object, $config->when]);
-        } elseif (is_array($config->when)) {
-            if (!is_callable($config->when)) {
-                throw new InvalidArgumentException(
-                    'Static when callback is not callable: '
-                    . implode('::', $config->when),
-                );
-            }
-            $guard = \Closure::fromCallable($config->when);
-        }
-
         $this->actions[$id] = [
             'condition' => $config->condition,
             'handle' => \Closure::fromCallable(
                 [$object, $method->getName()],
             ),
-            'guard' => $guard,
             'folder' => $config->folder,
         ];
     }
@@ -191,7 +168,6 @@ final class MailActionMatcher
             return null;
         }
 
-        $direct = [];
         $choices = [];
 
         foreach ($this->actions as $id => $action) {
@@ -202,34 +178,9 @@ final class MailActionMatcher
                 continue;
             }
 
-            if ($action['guard'] !== null) {
-                $eligible = ($action['guard'])($mail, $context);
-                if (!is_bool($eligible)) {
-                    throw new UnexpectedValueException(
-                        'Mail action when callback must return bool: ' . $id,
-                    );
-                }
-                if (!$eligible) {
-                    continue;
-                }
-            }
-
-            if ($action['condition'] === null) {
-                $direct[] = $id;
-            } else {
-                $choices[$id] = $action['condition'];
-            }
+            $choices[$id] = $action['condition'];
         }
 
-        if (count($direct) > 1) {
-            throw new UnexpectedValueException(
-                'More than one guard-only mail action matched: '
-                . implode(', ', $direct),
-            );
-        }
-        if ($direct !== []) {
-            return $direct[0];
-        }
         if ($choices === []) {
             return null;
         }
@@ -284,7 +235,7 @@ final class MailActionMatcher
                 : MailActions::pass();
         }
 
-        $result = ($this->actions[$id]['handle'])($content, $context);
+        $result = ($this->actions[$id]['handle'])($content);
         if (!$result instanceof MailAction) {
             throw new UnexpectedValueException(
                 'Mail action handlers must return MailAction: ' . $id,
