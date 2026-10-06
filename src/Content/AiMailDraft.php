@@ -191,7 +191,7 @@ final readonly class AiMailDraft extends AiMail
             aliases: $this->getAliases(),
             instructions: $this->getInstructions(),
             draftAttachments: $attachments ?? $this->draftAttachments,
-            context: $this->ai_get_context(),
+            context: $this->source->ai_get_context(),
         );
     }
 
@@ -200,6 +200,10 @@ final readonly class AiMailDraft extends AiMail
         ?AiContext $context = null,
         ?string $id = null,
     ): static {
+        if ($context !== null && $context->getContentById($id ?? $this->getId()) !== null) {
+            $context = $this->source->ai_get_context();
+        }
+
         return new self(
             source: $this->source,
             markdown: $rawData,
