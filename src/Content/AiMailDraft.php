@@ -34,7 +34,7 @@ final readonly class AiMailDraft extends AiMail
         public AiMail $source,
         string $markdown,
         public string $mode,
-        public string|array|null $to = null,
+        public string|array|null $draftTo = null,
         public ?string $draftSubject = null,
         public bool $answerable = true,
         public string $reason = '',
@@ -52,7 +52,7 @@ final readonly class AiMailDraft extends AiMail
             }
         }
 
-        $resolvedTo = $to ?? ($mode === self::MODE_REPLY ? $source->from : []);
+        $resolvedTo = $draftTo ?? ($mode === self::MODE_REPLY ? $source->from : []);
         $resolvedSubject = $draftSubject
             ?? ($mode === self::MODE_REPLY ? $source->subject : '');
         $generatedId = $id ?? 'draft:' . hash('sha256', json_encode([
@@ -104,7 +104,7 @@ final readonly class AiMailDraft extends AiMail
 
     public function recipient(): string|array|null
     {
-        return $this->to;
+        return $this->draftTo;
     }
 
     public function subject(): ?string
@@ -181,7 +181,7 @@ final readonly class AiMailDraft extends AiMail
             source: $this->source,
             markdown: $markdown ?? $this->getContent(),
             mode: $mode ?? $this->mode,
-            to: $to ?? $this->to,
+            draftTo: $to ?? $this->draftTo,
             draftSubject: $subject ?? $this->draftSubject,
             answerable: $this->answerable,
             reason: $this->reason,

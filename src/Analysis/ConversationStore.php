@@ -149,7 +149,7 @@ final readonly class ConversationFileInfo
 /**
  * Convenient scoped view used by actions.
  *
- * The default scope is the current mail thread. `MailContent::scopeFor()`
+ * The default scope is the current mail thread. `AiMail::scopeFor()`
  * can intentionally select a recipient/customer scope spanning several threads.
  */
 final readonly class ConversationScope
