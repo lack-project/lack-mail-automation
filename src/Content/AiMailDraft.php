@@ -122,11 +122,23 @@ final readonly class AiMailDraft extends AiMail
 
     public function setRecipient(string|array $recipient): self
     {
+        if ($this->mode === self::MODE_REPLY) {
+            throw new \LogicException(
+                'Reply draft recipients are derived from the source mail and cannot be replaced.',
+            );
+        }
+
         return $this->copy(to: $recipient);
     }
 
     public function setSubject(string $subject): self
     {
+        if ($this->mode === self::MODE_REPLY) {
+            throw new \LogicException(
+                'Reply draft subjects are derived from the source mail and cannot be replaced.',
+            );
+        }
+
         return $this->copy(subject: $subject);
     }
 
