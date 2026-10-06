@@ -28,7 +28,7 @@ final readonly class AiMailDraft extends AiMail
      * @param string|array|null $to Recipient for new/forward mails.
      * @param list<string> $aliases Prompt aliases for the generated mail.
      * @param list<AiDocument> $draftAttachments Attachments queued with the draft.
-     * @example $draft = $mail->ai_reply($prompt)->setSubject('Re: Profil');
+     * @example $draft = $mail->ai_forward('office@example.org', $prompt)->setSubject('Profil');
      * @see AiMail::ai_reply()
      */
     public function __construct(
@@ -228,7 +228,7 @@ final readonly class AiMailDraft extends AiMail
             aliases: $this->getAliases(),
             instructions: $this->getInstructions(),
             draftAttachments: $this->draftAttachments,
-            context: $context ?? $this->ai_get_context(),
+            context: $context ?? $this->source->ai_get_context(),
         );
     }
 }
