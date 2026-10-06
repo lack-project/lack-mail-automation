@@ -7,7 +7,7 @@ namespace Lack\MailAutomation\Analysis;
 use DateTimeImmutable;
 use InvalidArgumentException;
 use Lack\MailAutomation\AutomationStorage;
-use Lack\MailAutomation\Content\MailContent;
+use Lack\MailAutomation\Content\AiMail;
 use Lack\MailAutomation\Content\MailSummary;
 use Phore\AiHarness\Content\AiContent;
 use Phore\AiHarness\Content\AiDocument;
@@ -65,7 +65,7 @@ final class MailAnalyzer
     private array $previewHistory = [];
 
     /**
-     * Build one MailContent object plus its complete observed conversation.
+     * Build one AiMail object plus its complete observed conversation.
      *
      * Attachments use the most specific AI Harness AiDocument class. The final
      * context starts with a compact conversation summary and keeps complete
@@ -74,7 +74,7 @@ final class MailAnalyzer
      * @param array<string,mixed> $aiOptions AI Harness options.
      * @param ?ConversationStore $conversationStore Optional persistence backend.
      * @example $mail = (new MailAnalyzer())->analyze($email, $client, $storage, 'incoming');
-     * @see MailContent
+     * @see AiMail
      */
     public function __construct(
         private array $aiOptions = [],
@@ -119,7 +119,7 @@ final class MailAnalyzer
         AutomationStorage $storage,
         string $direction,
         bool $persist = true,
-    ): MailContent {
+    ): AiMail {
         if (!in_array($direction, ['incoming', 'outgoing'], true)) {
             throw new InvalidArgumentException(
                 'Direction must be incoming or outgoing.',
@@ -237,6 +237,10 @@ final class MailAnalyzer
             'inReplyTo' => $mail->inReplyTo(),
             'text' => $text,
         ];
+
+        $outboundIdentity = $direction === 'outgoing'
+            ? $this->matchOutboundDraft($mail, $storage, $account, $text)
+            : null;
 
         $fingerprint = hash(
             'sha256',
@@ -391,7 +395,7 @@ final class MailAnalyzer
 
         $loader = function (
             MailSummary $entry,
-        ) use ($client, $storage, $persist): MailContent {
+        ) use ($client, $storage, $persist): AiMail {
             if ($entry->serverId === null) {
                 throw new RuntimeException(
                     'No backing mail reference for historical message: '
@@ -415,7 +419,7 @@ final class MailAnalyzer
             );
         };
 
-        return new MailContent(
+        return new AiMail(
             original: $mail,
             metadata: $metadata,
             attachments: $attachments,
@@ -429,7 +433,64 @@ final class MailAnalyzer
             scopeStore: $scopeStore,
             aiOptions: $this->aiOptions,
             historyLoader: $loader,
+            id: $outboundIdentity['id'] ?? null,
+            aliases: $outboundIdentity['aliases'] ?? [],
+            instructions: $outboundIdentity['instructions'] ?? '',
         );
+    }
+
+    /**
+     * Recover AI-content identity for a generated draft from the Sent copy.
+     *
+     * Body edits are allowed: exact recipient+subject+body is preferred, then a
+     * unique recipient+subject match is accepted. Claimed records are ignored.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function matchOutboundDraft(
+        Email $mail,
+        AutomationStorage $storage,
+        string $account,
+        string $text,
+    ): ?array {
+        $recipients = array_map(
+            static fn ($address): string => strtolower($address->getAddress()),
+            [...$mail->to(), ...$mail->cc(), ...$mail->bcc()],
+        );
+        sort($recipients);
+        $subject = trim($mail->subject());
+        $bodyHash = hash('sha256', $text);
+
+        $exact = [];
+        $loose = [];
+        foreach ($storage->metadataAll('ai-outbound-draft', $account) as $key => $record) {
+            if (!is_array($record) || ($record['claimedMessageId'] ?? null) !== null) {
+                continue;
+            }
+
+            $expectedRecipients = $record['recipients'] ?? [];
+            sort($expectedRecipients);
+            if ($expectedRecipients !== $recipients || ($record['subject'] ?? '') !== $subject) {
+                continue;
+            }
+
+            $loose[$key] = $record;
+            if (($record['bodyHash'] ?? null) === $bodyHash) {
+                $exact[$key] = $record;
+            }
+        }
+
+        $matches = $exact !== [] ? $exact : $loose;
+        if (count($matches) !== 1) {
+            return null;
+        }
+
+        $key = array_key_first($matches);
+        $record = $matches[$key];
+        $record['claimedMessageId'] = $mail->messageId() ?? $mail->id();
+        $storage->metadataSet('ai-outbound-draft', $account, (string) $key, $record);
+
+        return $record;
     }
 
     private function interpret(
