@@ -30,7 +30,6 @@ final readonly class AiMail extends AiContent
 
     /**
      * @param string|array|null $to Recipient for new/forward mails.
-     * @param list<AiDocument> $attachments Attachments scheduled with the mail.
      * @param list<string> $aliases Human-readable prompt references.
      * @example $mail->ai_reply($prompt, aliases: ['initialReply'])->send();
      * @see MailContent::ai_reply()
@@ -40,7 +39,6 @@ final readonly class AiMail extends AiContent
         public string $mode,
         public string|array|null $to = null,
         public ?string $subject = null,
-        public array $attachments = [],
         public bool $answerable = true,
         public string $reason = '',
         ?AiContext $context = null,
@@ -50,12 +48,6 @@ final readonly class AiMail extends AiContent
     ) {
         if (!in_array($mode, [self::MODE_MAIL, self::MODE_REPLY, self::MODE_FORWARD], true)) {
             throw new InvalidArgumentException('Unknown AI mail mode: ' . $mode);
-        }
-
-        foreach ($attachments as $attachment) {
-            if (!$attachment instanceof AiDocument) {
-                throw new InvalidArgumentException('AI mail attachments must be AiDocument objects.');
-            }
         }
 
         parent::__construct(
@@ -70,49 +62,35 @@ final readonly class AiMail extends AiContent
     }
 
     /**
-     * Return a new mail draft with one additional attachment.
+     * Prepare delivery with one attachment without changing the AiMail content.
      *
-     * @return self Immutable copy containing the attachment.
-     * @example $draft = $draft->attach($pdf);
+     * @return AiMailDelivery Delivery builder containing this immutable mail.
+     * @example return $draft->attach($pdf)->send();
      * @see send()
      */
-    public function attach(AiDocument $attachment): self
+    public function attach(AiDocument $attachment): AiMailDelivery
     {
-        return new self(
-            markdown: $this->rawData,
-            mode: $this->mode,
-            to: $this->to,
-            subject: $this->subject,
-            attachments: [...$this->attachments, $attachment],
-            answerable: $this->answerable,
-            reason: $this->reason,
-            context: $this->ai_get_context(),
-            id: $this->id,
-            aliases: $this->aliases,
-            instructions: $this->instructions,
-        );
+        return new AiMailDelivery($this, [$attachment]);
     }
 
     /**
      * Schedule this generated mail for delivery.
      *
-     * An unanswerable AI draft becomes actionRequired instead of being sent.
-     * New and forwarded mails require a valid recipient and non-empty subject.
-     *
+     * @param list<AiDocument> $attachments Attachments to send.
      * @return MailAction Scheduled mail action or actionRequired.
      * @example return $mail->ai_mail($prompt, to: 'user@example.org')->send();
      * @see MailActions::schedule()
      */
-    public function send(): MailAction
+    public function send(array $attachments = []): MailAction
     {
         if (!$this->answerable || trim($this->rawData) === '') {
             return MailActions::actionRequired();
         }
 
-        $attachments = $this->normalizeAttachments();
+        $files = self::normalizeAttachments($attachments);
 
         if ($this->mode === self::MODE_REPLY) {
-            return MailActions::schedule()->sendReply($this->rawData, $attachments);
+            return MailActions::schedule()->sendReply($this->rawData, $files);
         }
 
         if ($this->to === null || $this->to === []) {
@@ -132,7 +110,7 @@ final readonly class AiMail extends AiContent
         $email = (new Email(to: $this->to, subject: $this->subject))
             ->withMarkdown($this->rawData);
 
-        foreach ($attachments as $attachment) {
+        foreach ($files as $attachment) {
             $email = $email->attach($attachment);
         }
 
@@ -162,7 +140,6 @@ final readonly class AiMail extends AiContent
             mode: $this->mode,
             to: $this->to,
             subject: $this->subject,
-            attachments: $this->attachments,
             answerable: $this->answerable,
             reason: $this->reason,
             context: $context,
@@ -172,12 +149,15 @@ final readonly class AiMail extends AiContent
         );
     }
 
-    /** @return list<Attachment> */
-    private function normalizeAttachments(): array
+    /** @param list<AiDocument> $attachments @return list<Attachment> */
+    private static function normalizeAttachments(array $attachments): array
     {
         $files = [];
 
-        foreach ($this->attachments as $attachment) {
+        foreach ($attachments as $attachment) {
+            if (!$attachment instanceof AiDocument) {
+                throw new InvalidArgumentException('AI mail attachments must be AiDocument objects.');
+            }
             if ($attachment->fileName === null) {
                 throw new InvalidArgumentException('AI mail attachment requires a filename.');
             }
@@ -190,5 +170,33 @@ final readonly class AiMail extends AiContent
         }
 
         return $files;
+    }
+}
+
+/**
+ * Immutable delivery builder for an AiMail plus attachments.
+ */
+final readonly class AiMailDelivery
+{
+    /** @param list<AiDocument> $attachments */
+    public function __construct(
+        public AiMail $mail,
+        public array $attachments = [],
+    ) {
+        foreach ($attachments as $attachment) {
+            if (!$attachment instanceof AiDocument) {
+                throw new InvalidArgumentException('AI mail attachments must be AiDocument objects.');
+            }
+        }
+    }
+
+    public function attach(AiDocument $attachment): self
+    {
+        return new self($this->mail, [...$this->attachments, $attachment]);
+    }
+
+    public function send(): MailAction
+    {
+        return $this->mail->send($this->attachments);
     }
 }
