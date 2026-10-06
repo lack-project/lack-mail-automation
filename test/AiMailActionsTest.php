@@ -113,7 +113,8 @@ final class AiMailActionsTest extends TestCase
 
         self::assertInstanceOf(AiMail::class, $draft);
         self::assertSame('reply-1', $draft->getId());
-        self::assertSame(['ersteAntwort'], $draft->getAliases());
+        self::assertContains('ersteAntwort', $draft->getAliases());
+        self::assertContains('draft', $draft->getAliases());
 
         $action = $draft->send();
 
@@ -127,7 +128,7 @@ final class AiMailActionsTest extends TestCase
             source: $this->mailContent(),
             markdown: 'Anbei der Entwurf.',
             mode: AiMailDraft::MODE_MAIL,
-            to: 'user@example.org',
+            draftTo: 'user@example.org',
             draftSubject: 'Entwurf',
             id: 'mail-1',
         );
