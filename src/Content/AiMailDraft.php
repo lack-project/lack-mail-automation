@@ -8,6 +8,7 @@ use DateTimeImmutable;
 use InvalidArgumentException;
 use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailActions;
+use Phore\AiHarness\AiContext;
 use Phore\AiHarness\Content\AiDocument;
 use Phore\MailClient\Email;
 
@@ -42,6 +43,7 @@ final readonly class AiMailDraft extends AiMail
         array $aliases = [],
         string $instructions = '',
         private array $draftAttachments = [],
+        ?AiContext $context = null,
     ) {
         if (!in_array($mode, [self::MODE_MAIL, self::MODE_REPLY, self::MODE_FORWARD], true)) {
             throw new InvalidArgumentException('Unknown AI mail draft mode: ' . $mode);
@@ -94,7 +96,7 @@ final readonly class AiMailDraft extends AiMail
             scopeStore: $source->scopeStore,
             aiOptions: $source->aiOptions,
             historyLoader: $source->historyLoader,
-            context: $source->ai_get_context(),
+            context: $context ?? $source->ai_get_context(),
             prepareConversation: false,
             id: $generatedId,
             aliases: array_values(array_unique(['draft', ...$aliases])),
@@ -189,6 +191,29 @@ final readonly class AiMailDraft extends AiMail
             aliases: $this->getAliases(),
             instructions: $this->getInstructions(),
             draftAttachments: $attachments ?? $this->draftAttachments,
+            context: $this->ai_get_context(),
+        );
+    }
+
+    protected function recreate(
+        string $rawData,
+        ?AiContext $context = null,
+        ?string $id = null,
+    ): static {
+        return new self(
+            source: $this->source,
+            markdown: $rawData,
+            mode: $this->mode,
+            draftTo: $this->draftTo,
+            draftSubject: $this->draftSubject,
+            answerable: $this->answerable,
+            reason: $this->reason,
+            id: $id ?? $this->getId(),
+            aliases: $this->getAliases(),
+            instructions: $this->getInstructions(),
+            draftAttachments: $this->draftAttachments,
+            context: $context ?? $this->ai_get_context(),
         );
     }
 }
+
