@@ -21,14 +21,16 @@ final readonly class OnMailAction
      * @param string $condition Natural-language condition for selecting this action.
      * @param Folder|string $folder Source folder for this action.
      * @param ?string $id Stable choice ID; defaults to class or method name.
+     * @param int $priority Higher values win when several conditions fit equally well.
      * @throws InvalidArgumentException For unusable declarations.
-     * @example #[OnMailAction(condition: 'This is the first reply to our initial applicant mail.')]
+     * @example #[OnMailAction(condition: 'This is the first reply to our initial applicant mail.', priority: 100)]
      * @see \Lack\MailAutomation\MailAutomation::addMailActions()
      */
     public function __construct(
         public string $condition,
         public Folder|string $folder = Folder::Inbox,
         public ?string $id = null,
+        public int $priority = 0,
     ) {
         if (trim($condition) === '') {
             throw new InvalidArgumentException('Mail action condition must not be empty.');
