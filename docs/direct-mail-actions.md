@@ -23,7 +23,7 @@ application file.
 ## 2. Run it
 
 ```bash
-vendor/bin/lack-mail-automation run
+vendor/bin/lack-mail-automation.php run
 ```
 
 Use `--dry-run` for analysis without persistence or delivery. Use

@@ -4,14 +4,8 @@
   "description": "Stateful mailbox automation, contact resolution and rule processing on top of phore/mail-client.",
   "license": "MIT",
   "repositories": [
-    {
-      "type": "vcs",
-      "url": "https://github.com/phore/phore-mailclient"
-    },
-    {
-      "type": "vcs",
-      "url": "https://github.com/phore/phore-ai-harness"
-    }
+    {"type": "vcs", "url": "https://github.com/phore/phore-mailclient"},
+    {"type": "vcs", "url": "https://github.com/phore/phore-ai-harness"}
   ],
   "require": {
     "php": ">=8.5",
@@ -19,30 +13,28 @@
     "ext-pdo": "*",
     "ext-pdo_sqlite": "*",
     "phore/ai-harness": "dev-main",
+    "phore/cli2": "dev-main",
     "phore/filesystem": "*",
     "phore/log": "dev-master",
-    "phore/mail-client": "dev-main",
-    "phore/cli2": "dev-main"
+    "phore/mail-client": "dev-main"
   },
   "require-dev": {
     "phpunit/phpunit": "^13.2"
   },
   "autoload": {
-    "classmap": [
-      "src/"
-    ]
+    "classmap": ["src/"]
   },
   "autoload-dev": {
     "psr-4": {
       "Lack\\MailAutomation\\Test\\": "test/"
     }
   },
+  "bin": [
+    "bin/lack-mail-automation.php"
+  ],
   "scripts": {
     "test": "phpunit test"
   },
   "minimum-stability": "dev",
-  "prefer-stable": true,
-  "bin": [
-    "bin/lack-mail-automation.php"
-  ]
+  "prefer-stable": true
 }

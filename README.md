@@ -33,9 +33,9 @@ configured in the existing `phore/mail-client` mailbox YAML/JSON.
 The package installs `vendor/bin/lack-mail-automation`:
 
 ```bash
-vendor/bin/lack-mail-automation run
-vendor/bin/lack-mail-automation run --dry-run
-vendor/bin/lack-mail-automation run --mail-id '<mail-client-id>'
+vendor/bin/lack-mail-automation.php run
+vendor/bin/lack-mail-automation.php run --dry-run
+vendor/bin/lack-mail-automation.php run --mail-id '<mail-client-id>'
 ```
 
 The default bootstrap is `automail/bootstrap.php`; use `--bootstrap` only
