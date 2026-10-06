@@ -276,58 +276,72 @@ final readonly class MailContent extends AiContent
     }
 
     /**
-     * Generate and schedule a reply from the bound AI context.
+     * Generate a reply draft from the bound AI context.
+     *
+     * The returned AiMail is AI content and is not sent until send() is called.
      *
      * @param string|PromptType|array<int,string|PromptType> $prompt Trusted application prompt.
      * @param array<string,mixed> $options Per-call AI Harness options.
-     * @param null|callable(ResponseMailDraft,self):array<AiDocument> $attachments Optional attachment factory.
-     * @return MailAction Scheduled reply or actionRequired.
-     * @example return $mail->ai_reply(new PromptFile(__DIR__ . '/_prompts/reply.md'));
-     * @see \Phore\AiHarness\AiContextTrait::ai_struct()
+     * @param string|null $id Optional stable content ID.
+     * @param list<string> $aliases Optional prompt aliases.
+     * @param string $instructions Content-specific handling instructions.
+     * @return AiMail Generated reply content.
+     * @example return $mail->ai_reply(new PromptFile(__DIR__ . '/_prompts/reply.md'))->send();
+     * @see AiMail::send()
      */
     public function ai_reply(
         string|PromptType|array $prompt,
         array $options = [],
-        ?callable $attachments = null,
-    ): MailAction {
+        ?string $id = null,
+        array $aliases = [],
+        string $instructions = '',
+    ): AiMail {
         $prompts = is_array($prompt) ? array_values($prompt) : [$prompt];
         $prompts[] = 'Return answerable=false when the conversation is insufficient or contradictory. '
             . 'When answerable=true, markdown must contain only the complete send-ready reply body.';
 
         /** @var ResponseMailDraft $draft */
         $draft = $this->ai_struct($prompts, ResponseMailDraft::class, $options);
-        if (!$draft->answerable || trim($draft->markdown) === '') {
-            return MailActions::actionRequired();
-        }
 
-        return $this->reply(
-            $draft->markdown,
-            $this->resolveGeneratedAttachments($attachments, $draft),
+        return new AiMail(
+            markdown: $draft->markdown,
+            mode: AiMail::MODE_REPLY,
+            answerable: $draft->answerable,
+            reason: $draft->reason,
+            context: $this->ai_get_context(),
+            id: $id,
+            aliases: $aliases,
+            instructions: $instructions,
         );
     }
 
     /**
-     * Generate and schedule a new mail from the bound conversation.
+     * Generate a new mail draft from the bound conversation.
      *
      * When $to is null, the trusted application prompt must identify the
-     * recipient from the supplied conversation. The result is syntax-validated.
+     * recipient from the supplied conversation. The generated mail remains an
+     * AiContent block until send() is called.
      *
-     * @param string|array|null $to Fixed recipient or null for AI extraction.
      * @param string|PromptType|array<int,string|PromptType> $prompt Trusted application prompt.
-     * @param array<string,mixed> $options Per-call AI Harness options.
-     * @param null|callable(GeneratedMailDraft,self):array<AiDocument> $attachments Optional attachment factory.
+     * @param string|array|null $to Fixed recipient or null for AI extraction.
      * @param string|null $subject Fixed subject or null for AI generation.
-     * @return MailAction Scheduled new mail or actionRequired.
-     * @example return $mail->ai_mail(null, new PromptFile(__DIR__ . '/_prompts/initial.md'));
-     * @see MailActions::schedule()
+     * @param array<string,mixed> $options Per-call AI Harness options.
+     * @param string|null $id Optional stable content ID.
+     * @param list<string> $aliases Optional prompt aliases.
+     * @param string $instructions Content-specific handling instructions.
+     * @return AiMail Generated outbound mail content.
+     * @example return $mail->ai_mail($prompt, to: null, aliases: ['initialContact'])->send();
+     * @see AiMail::send()
      */
     public function ai_mail(
-        string|array|null $to,
         string|PromptType|array $prompt,
-        array $options = [],
-        ?callable $attachments = null,
+        string|array|null $to = null,
         ?string $subject = null,
-    ): MailAction {
+        array $options = [],
+        ?string $id = null,
+        array $aliases = [],
+        string $instructions = '',
+    ): AiMail {
         $prompts = is_array($prompt) ? array_values($prompt) : [$prompt];
         $prompts[] = 'Return answerable=false when the context is insufficient or contradictory. '
             . 'When answerable=true, return to, subject and the complete send-ready markdown body. '
@@ -335,42 +349,53 @@ final readonly class MailContent extends AiContent
 
         /** @var GeneratedMailDraft $draft */
         $draft = $this->ai_struct($prompts, GeneratedMailDraft::class, $options);
-        if (!$draft->answerable || trim($draft->markdown) === '') {
-            return MailActions::actionRequired();
-        }
 
         $resolvedTo = $to ?? strtolower(trim($draft->to));
-        if (is_string($resolvedTo) && filter_var($resolvedTo, FILTER_VALIDATE_EMAIL) === false) {
-            return MailActions::actionRequired();
-        }
-
         $resolvedSubject = $subject ?? trim($draft->subject);
+        $answerable = $draft->answerable && trim($draft->markdown) !== '';
+
+        if (is_string($resolvedTo) && filter_var($resolvedTo, FILTER_VALIDATE_EMAIL) === false) {
+            $answerable = false;
+        }
+        if (is_array($resolvedTo)) {
+            foreach ($resolvedTo as $recipient) {
+                if (!is_string($recipient) || filter_var($recipient, FILTER_VALIDATE_EMAIL) === false) {
+                    $answerable = false;
+                    break;
+                }
+            }
+        }
         if ($resolvedSubject === '') {
-            return MailActions::actionRequired();
+            $answerable = false;
         }
 
-        $mail = (new Email(to: $resolvedTo, subject: $resolvedSubject))
-            ->withMarkdown($draft->markdown);
-        foreach (
-            $this->normalizeAttachments(
-                $this->resolveGeneratedAttachments($attachments, $draft),
-            ) as $attachment
-        ) {
-            $mail = $mail->attach($attachment);
-        }
-
-        return MailActions::schedule()->sendMail($mail);
+        return new AiMail(
+            markdown: $draft->markdown,
+            mode: AiMail::MODE_MAIL,
+            to: $resolvedTo,
+            subject: $resolvedSubject,
+            answerable: $answerable,
+            reason: $draft->reason,
+            context: $this->ai_get_context(),
+            id: $id,
+            aliases: $aliases,
+            instructions: $instructions,
+        );
     }
 
     /**
-     * Generate and schedule a forward-style mail with an explicit recipient.
+     * Generate a forward-style mail with an explicit recipient.
      *
      * @param string|array $to Forward recipient.
      * @param string|PromptType|array<int,string|PromptType> $prompt Trusted application prompt.
      * @param array<string,mixed> $options Per-call AI Harness options.
      * @param bool $includeOriginalAttachments Copy current source attachments.
-     * @return MailAction Scheduled forward mail or actionRequired.
-     * @example return $mail->ai_forward('office@example.org', new PromptFile(__DIR__ . '/_prompts/forward.md'));
+     * @param string|null $subject Fixed forward subject.
+     * @param string|null $id Optional stable content ID.
+     * @param list<string> $aliases Optional prompt aliases.
+     * @param string $instructions Content-specific handling instructions.
+     * @return AiMail Generated forward content.
+     * @example return $mail->ai_forward('office@example.org', $prompt)->send();
      * @see ai_mail()
      */
     public function ai_forward(
@@ -378,16 +403,48 @@ final readonly class MailContent extends AiContent
         string|PromptType|array $prompt,
         array $options = [],
         bool $includeOriginalAttachments = false,
-    ): MailAction {
-        $subject = preg_match('/^Fwd:/i', $this->subject) === 1
-            ? $this->subject
-            : 'Fwd: ' . $this->subject;
+        ?string $subject = null,
+        ?string $id = null,
+        array $aliases = [],
+        string $instructions = '',
+    ): AiMail {
+        $resolvedSubject = $subject ?? (
+            preg_match('/^Fwd:/i', $this->subject) === 1
+                ? $this->subject
+                : 'Fwd: ' . $this->subject
+        );
 
-        $attachments = $includeOriginalAttachments
-            ? fn (): array => $this->attachments
-            : null;
+        $draft = $this->ai_mail(
+            $prompt,
+            to: $to,
+            subject: $resolvedSubject,
+            options: $options,
+            id: $id,
+            aliases: $aliases,
+            instructions: $instructions,
+        );
 
-        return $this->ai_mail($to, $prompt, $options, $attachments, $subject);
+        if (!$includeOriginalAttachments) {
+            return $draft;
+        }
+
+        foreach ($this->attachments as $attachment) {
+            $draft = $draft->attach($attachment);
+        }
+
+        return new AiMail(
+            markdown: $draft->rawData,
+            mode: AiMail::MODE_FORWARD,
+            to: $draft->to,
+            subject: $draft->subject,
+            attachments: $draft->attachments,
+            answerable: $draft->answerable,
+            reason: $draft->reason,
+            context: $draft->ai_get_context(),
+            id: $draft->getId(),
+            aliases: $draft->getAliases(),
+            instructions: $draft->getInstructions(),
+        );
     }
 
     /**
