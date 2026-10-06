@@ -11,6 +11,7 @@ use Lack\MailAutomation\Analysis\ConversationScope;
 use Lack\MailAutomation\Analysis\ConversationStore;
 use Lack\MailAutomation\Analysis\MailActionMatcher;
 use Lack\MailAutomation\Attributes\OnMailAction;
+use Lack\MailAutomation\Content\AiMail;
 use Lack\MailAutomation\Content\MailContent;
 use Lack\MailAutomation\Content\MailSummary;
 use Lack\MailAutomation\Folder;
@@ -127,6 +128,50 @@ final class AiMailActionsTest extends TestCase
             [Folder::Inbox, Folder::Inbox],
             $matcher->folders(),
         );
+    }
+
+    public function testAiMailIsContentAndSchedulesOnlyOnSend(): void
+    {
+        $draft = new AiMail(
+            markdown: 'Hallo Welt',
+            mode: AiMail::MODE_REPLY,
+            id: 'reply-1',
+            aliases: ['ersteAntwort'],
+            instructions: 'Kurz und freundlich formulieren.',
+        );
+
+        self::assertInstanceOf(AiContent::class, $draft);
+        self::assertSame('reply-1', $draft->getId());
+        self::assertSame(['ersteAntwort'], $draft->getAliases());
+
+        $action = $draft->send();
+
+        self::assertSame('sendReply', $action->items()[0]['type']);
+        self::assertSame('Hallo Welt', $action->items()[0]['args'][0]);
+    }
+
+    public function testAiMailAttachmentBuilderKeepsMailIdentity(): void
+    {
+        $draft = new AiMail(
+            markdown: 'Anbei der Entwurf.',
+            mode: AiMail::MODE_MAIL,
+            to: 'user@example.org',
+            subject: 'Entwurf',
+            id: 'mail-1',
+        );
+        $document = AiMarkdown::fromRaw(
+            '# CV',
+            fileName: 'cv.md',
+            id: 'cv-1',
+        );
+
+        $delivery = $draft->attach($document);
+        self::assertSame($draft, $delivery->mail);
+
+        $action = $delivery->send();
+
+        self::assertSame('sendMail', $action->items()[0]['type']);
+        self::assertSame('mail-1', $draft->getId());
     }
 
     public function testConversationScopeStoresMetadataAndFilesThroughInterface(): void
