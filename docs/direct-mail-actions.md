@@ -22,7 +22,7 @@ final class RequestDetails
     {
         return $mail->ai_reply(
             new PromptFile(__DIR__ . '/_prompts/request-details.md'),
-        );
+        )->send();
     }
 }
 ```
@@ -78,13 +78,13 @@ $pdf = $mail->ai_query_content(
 
 ## 4. Create, reply and forward
 
-A new mail can derive its recipient from the conversation:
+`ai_mail()`, `ai_reply()` and `ai_forward()` return an `AiMail` content block. Only `send()` schedules delivery. A new mail can derive its recipient from the conversation:
 
 ```php
 return $mail->ai_mail([
     new PromptFile(__DIR__ . '/_prompts/initial.md'),
     'Use the applicant email address and salutation from the lead mail.',
-]);
+        ])->send();
 ```
 
 A reply keeps the current thread:
@@ -93,7 +93,7 @@ A reply keeps the current thread:
 return $mail->ai_reply(
     new PromptFile(__DIR__ . '/_prompts/review.md'),
     attachments: [$pdf],
-);
+        )->send();
 ```
 
 A forward has an explicit recipient while body and subject can still be
@@ -103,8 +103,8 @@ generated from the conversation:
 return $mail->ai_forward(
     'office@example.org',
     new PromptFile(__DIR__ . '/_prompts/forward.md'),
-    attachments: [$pdf],
-);
+    subject: 'Approved CV',
+)->attach($pdf)->send();
 ```
 
 ## 5. Extra persistent state
