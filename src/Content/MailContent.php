@@ -386,23 +386,23 @@ final readonly class MailContent extends AiContent
     /**
      * Generate a forward-style mail with an explicit recipient.
      *
+     * Attachments are added explicitly on the returned AiMail via attach().
+     *
      * @param string|array $to Forward recipient.
      * @param string|PromptType|array<int,string|PromptType> $prompt Trusted application prompt.
      * @param array<string,mixed> $options Per-call AI Harness options.
-     * @param bool $includeOriginalAttachments Copy current source attachments.
      * @param string|null $subject Fixed forward subject.
      * @param string|null $id Optional stable content ID.
      * @param list<string> $aliases Optional prompt aliases.
      * @param string $instructions Content-specific handling instructions.
      * @return AiMail Generated forward content.
-     * @example return $mail->ai_forward('office@example.org', $prompt)->send();
+     * @example return $mail->ai_forward('office@example.org', $prompt)->attach($pdf)->send();
      * @see ai_mail()
      */
     public function ai_forward(
         string|array $to,
         string|PromptType|array $prompt,
         array $options = [],
-        bool $includeOriginalAttachments = false,
         ?string $subject = null,
         ?string $id = null,
         array $aliases = [],
@@ -424,23 +424,14 @@ final readonly class MailContent extends AiContent
             instructions: $instructions,
         );
 
-        if (!$includeOriginalAttachments) {
-            return $draft;
-        }
-
-        foreach ($this->attachments as $attachment) {
-            $draft = $draft->attach($attachment);
-        }
-
         return new AiMail(
             markdown: $draft->rawData,
             mode: AiMail::MODE_FORWARD,
             to: $draft->to,
             subject: $draft->subject,
-            attachments: $draft->attachments,
             answerable: $draft->answerable,
             reason: $draft->reason,
-            context: $draft->ai_get_context(),
+            context: $this->ai_get_context(),
             id: $draft->getId(),
             aliases: $draft->getAliases(),
             instructions: $draft->getInstructions(),
