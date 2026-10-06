@@ -7,37 +7,32 @@ use Lack\MailAutomation\Attributes\OnMailAction;
 use Lack\MailAutomation\Content\MailContent;
 use Lack\MailAutomation\MailAction;
 use Lack\MailAutomation\MailAutomation;
-use Lack\MailAutomation\MailContext;
 use Phore\AiHarness\PromptType\PromptFile;
 use Phore\MailClient\MailboxConfig;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
 
 #[OnMailAction(
-    condition: 'The current mail is a new social-media lead containing applicant contact data, is not a security code or an ordinary applicant reply, and no initial contact has already been created later in the conversation.',
+    condition: 'The current mail contains a new applicant lead and no initial contact for this lead appears later in the conversation.',
 )]
-final class MetaLeadAction
+final class InitialContact
 {
-    public function __invoke(
-        MailContent $mail,
-        MailContext $context,
-    ): MailAction {
-        return $mail->ai_mail(
-            null,
+    public function __invoke(MailContent $mail): MailAction
+    {
+        return $mail->ai_mail([
             new PromptFile(__DIR__ . '/prompts/07-initial-reply.md'),
-        );
+            'Derive recipient address and salutation from the lead mail.',
+        ]);
     }
 }
 
 #[OnMailAction(
-    condition: 'The applicant asks to create or change the profile and this request is still open.',
+    condition: 'This is the applicant first reply to our initial contact and more CV information is still required.',
 )]
-final class ProfileAction
+final class RequestDetails
 {
-    public function __invoke(
-        MailContent $mail,
-        MailContext $context,
-    ): MailAction {
+    public function __invoke(MailContent $mail): MailAction
+    {
         return $mail->ai_reply(
             new PromptFile(__DIR__ . '/prompts/07-profile-reply.md'),
         );
@@ -52,8 +47,8 @@ $automation = new MailAutomation(
 );
 
 $automation->addMailActions([
-    new MetaLeadAction(),
-    new ProfileAction(),
+    new InitialContact(),
+    new RequestDetails(),
 ]);
 
 $automation->run();
