@@ -22,7 +22,7 @@ final class InitialContact
         return $mail->ai_mail([
             new PromptFile(__DIR__ . '/prompts/07-initial-reply.md'),
             'Derive recipient address and salutation from the lead mail.',
-        ]);
+        ])->send();
     }
 }
 
@@ -35,7 +35,7 @@ final class RequestDetails
     {
         return $mail->ai_reply(
             new PromptFile(__DIR__ . '/prompts/07-profile-reply.md'),
-        );
+        )->send();
     }
 }
 
