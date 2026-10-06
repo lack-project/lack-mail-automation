@@ -143,6 +143,9 @@ final readonly class MailContent extends AiContent
         private ?\Closure $historyLoader = null,
         ?AiContext $context = null,
         bool $prepareConversation = true,
+        ?string $id = null,
+        array $aliases = [],
+        string $instructions = '',
     ) {
         $this->subject = $metadata->subject;
         $this->date = $metadata->date;
@@ -161,9 +164,11 @@ final readonly class MailContent extends AiContent
             fileName: 'mail.txt',
             description: $metadata->summary,
             context: $prepared,
-            id: 'mail:' . $metadata->id,
-            aliases: ['mail', 'current-mail'],
-            instructions: 'This is the complete current target mail body. Use the conversation summary index first and inspect full source content when needed.',
+            id: $id ?? 'mail:' . $metadata->id,
+            aliases: array_values(array_unique(['mail', 'current-mail', ...$aliases])),
+            instructions: $instructions !== ''
+                ? $instructions
+                : 'This is the complete current target mail body. Use the conversation summary index first and inspect full source content when needed.',
         );
     }
 
@@ -484,6 +489,9 @@ final readonly class MailContent extends AiContent
             historyLoader: $this->historyLoader,
             context: $context,
             prepareConversation: false,
+            id: $id,
+            aliases: $this->getAliases(),
+            instructions: $this->getInstructions(),
         );
     }
 
