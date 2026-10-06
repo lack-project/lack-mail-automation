@@ -12,7 +12,7 @@ use Lack\MailAutomation\Analysis\ConversationStore;
 use Lack\MailAutomation\Analysis\MailActionMatcher;
 use Lack\MailAutomation\Attributes\OnMailAction;
 use Lack\MailAutomation\Content\AiMail;
-use Lack\MailAutomation\Content\MailContent;
+use Lack\MailAutomation\Content\AiMailDraft;
 use Lack\MailAutomation\Content\MailSummary;
 use Lack\MailAutomation\Folder;
 use Lack\MailAutomation\MailAction;
@@ -25,7 +25,7 @@ use PHPUnit\Framework\TestCase;
 #[OnMailAction(condition: 'The current message asks for a profile update.')]
 final class AiConditionAction
 {
-    public function __invoke(MailContent $mail): MailAction
+    public function __invoke(AiMail $mail): MailAction
     {
         return MailActions::complete();
     }
@@ -100,17 +100,18 @@ final class AiMailActionsTest extends TestCase
         self::assertSame([Folder::Inbox], $matcher->folders());
     }
 
-    public function testAiMailIsContentAndSchedulesOnlyOnSend(): void
+    public function testAiMailDraftIsAiMailAndSchedulesOnlyOnSend(): void
     {
-        $draft = new AiMail(
+        $draft = new AiMailDraft(
+            source: $this->mailContent(),
             markdown: 'Hallo Welt',
-            mode: AiMail::MODE_REPLY,
+            mode: AiMailDraft::MODE_REPLY,
             id: 'reply-1',
             aliases: ['ersteAntwort'],
             instructions: 'Kurz und freundlich formulieren.',
         );
 
-        self::assertInstanceOf(AiContent::class, $draft);
+        self::assertInstanceOf(AiMail::class, $draft);
         self::assertSame('reply-1', $draft->getId());
         self::assertSame(['ersteAntwort'], $draft->getAliases());
 
@@ -120,13 +121,14 @@ final class AiMailActionsTest extends TestCase
         self::assertSame('Hallo Welt', $action->items()[0]['args'][0]);
     }
 
-    public function testAiMailAttachmentBuilderKeepsMailIdentity(): void
+    public function testAiMailDraftAttachmentKeepsMailIdentity(): void
     {
-        $draft = new AiMail(
+        $draft = new AiMailDraft(
+            source: $this->mailContent(),
             markdown: 'Anbei der Entwurf.',
-            mode: AiMail::MODE_MAIL,
+            mode: AiMailDraft::MODE_MAIL,
             to: 'user@example.org',
-            subject: 'Entwurf',
+            draftSubject: 'Entwurf',
             id: 'mail-1',
         );
         $document = AiMarkdown::fromRaw(
@@ -136,7 +138,8 @@ final class AiMailActionsTest extends TestCase
         );
 
         $delivery = $draft->attach($document);
-        self::assertSame($draft, $delivery->mail);
+        self::assertInstanceOf(AiMailDraft::class, $delivery);
+        self::assertSame('mail-1', $delivery->getId());
 
         $action = $delivery->send();
 
@@ -169,7 +172,7 @@ final class AiMailActionsTest extends TestCase
         self::assertSame(9, $scope->files()['profile.md']->size);
     }
 
-    public function testMailContentIsAiContentWithSummaryAndAttachments(): void
+    public function testAiMailIsAiContentWithSummaryAndAttachments(): void
     {
         $mail = $this->mailContent();
 
@@ -197,7 +200,7 @@ final class AiMailActionsTest extends TestCase
         new OnMailAction('');
     }
 
-    public function testMailContentAcceptsContentIdentityMetadata(): void
+    public function testAiMailAcceptsContentIdentityMetadata(): void
     {
         $mail = $this->mailContent(
             id: 'incoming-lead',
@@ -217,7 +220,7 @@ final class AiMailActionsTest extends TestCase
         ?string $id = null,
         array $aliases = [],
         string $instructions = '',
-    ): MailContent
+    ): AiMail
     {
         $store = new MemoryConversationStore();
         $scope = new ConversationScope('thread-1', $store);
@@ -262,7 +265,7 @@ final class AiMailActionsTest extends TestCase
             aliases: ['cv.md'],
         );
 
-        return new MailContent(
+        return new AiMail(
             original: (
                 new Email(
                     from: 'user@example.org',
