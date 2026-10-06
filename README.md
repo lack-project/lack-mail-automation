@@ -51,8 +51,8 @@ retains the same AI-content capabilities, but only the draft type exposes
 outbound mutation/delivery operations:
 
 ```php
-$draft = $mail->ai_reply($prompt)
-    ->setSubject('Re: Lebenslauf')
+$draft = $mail->ai_forward('office@example.org', $prompt)
+    ->setSubject('Lebenslauf')
     ->attach($pdf);
 
 return $draft->send();
@@ -60,7 +60,9 @@ return $draft->send();
 
 Available draft operations include `setRecipient()`, `setSubject()`,
 `setText()`, `attach()`, `draft()` and `send()`. The setters are fluent
-and return a new typed draft.
+and return a new typed draft. Reply recipients and subjects remain derived
+from the source mail so threading information is preserved; those two setters
+are therefore only valid for new/forward drafts.
 
 Sending does not directly become conversation history. The draft identity
 (ID, aliases and instructions) is persisted as pending outbound metadata. The
