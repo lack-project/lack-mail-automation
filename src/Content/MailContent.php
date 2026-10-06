@@ -412,16 +412,10 @@ final readonly class MailContent extends AiContent
         array $aliases = [],
         string $instructions = '',
     ): AiMail {
-        $resolvedSubject = $subject ?? (
-            preg_match('/^Fwd:/i', $this->subject) === 1
-                ? $this->subject
-                : 'Fwd: ' . $this->subject
-        );
-
         $draft = $this->ai_mail(
             $prompt,
             to: $to,
-            subject: $resolvedSubject,
+            subject: $subject,
             options: $options,
             id: $id,
             aliases: $aliases,
