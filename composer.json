@@ -30,7 +30,7 @@
     }
   },
   "bin": [
-    "bin/lack-mail-automation.php"
+    "bin/lack-mail-automation"
   ],
   "scripts": {
     "test": "phpunit test"
