@@ -17,8 +17,8 @@ final readonly class MailAutomationConfig
 {
     /**
      * @param MailboxConfig|string $mailbox Mailbox config object or local YAML/JSON file.
-     * @param string $storage SQLite state path.
      * @param string $actionsDirectory Directory scanned recursively for mail actions.
+     * @param string $storage SQLite state path; defaults to "var/mail-automation.sqlite".
      * @param array<string,mixed> $aiOptions Options passed to the AI harness.
      * @param string $actionPattern Filename pattern for discovered action classes.
      * @param bool $flagUnhandled Flag unmatched AI-routed messages for manual review.
@@ -28,15 +28,14 @@ final readonly class MailAutomationConfig
      * @example
      * $config = new MailAutomationConfig(
      *     mailbox: __DIR__ . '/mailbox.yaml',
-     *     storage: __DIR__ . '/run/mail.sqlite',
      *     actionsDirectory: __DIR__ . '/actions',
      * );
      * @see MailAutomation::fromConfig()
      */
     public function __construct(
         public MailboxConfig|string $mailbox,
-        public string $storage,
         public string $actionsDirectory,
+        public string $storage = 'var/mail-automation.sqlite',
         public array $aiOptions = [],
         public string $actionPattern = '*Action.php',
         public bool $flagUnhandled = true,

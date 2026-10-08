@@ -19,7 +19,6 @@ use Lack\MailAutomation\MailAutomationConfig;
 return MailAutomation::fromConfig(
     new MailAutomationConfig(
         mailbox: dirname(__DIR__) . '/mailclient.yaml',
-        storage: __DIR__ . '/run/mail-automation.sqlite',
         actionsDirectory: __DIR__ . '/actions',
     ),
 );
