@@ -3,6 +3,9 @@ declare(strict_types=1);
 namespace Lack\MailAutomation;
 
 use Lack\MailAutomation\Attributes\OnFolderAutomation;
+use Lack\MailAutomation\Attributes\OnMailAction;
+use Lack\MailAutomation\Content\AiMail;
+use Lack\MailAutomation\Content\AiMailDraft;
 use PDO;
 use Phore\Log\PhoreLogger;
 use Phore\MailClient\Email;
@@ -58,6 +61,11 @@ final class MailAutomation
     /** @var array<string,true> Message-IDs handed off for the next run. */
     private array $deferred = [];
     private int $order = 0;
+    private string $inboxFolder;
+    private string $sentFolder;
+    private ?string $lockFile = null;
+    /** @var resource|null */
+    private $runLock = null;
 
     public function __construct(
         private MailClient $client,
@@ -65,8 +73,13 @@ final class MailAutomation
         ?ContactResolver $contactResolver = null,
         private ?DraftSender $sender = null,
         ?PhoreLogger $logger = null,
+        private ?Analysis\MailAnalyzer $mailAnalyzer = null,
+        Folder|string $inboxFolder = Folder::Inbox,
+        Folder|string $sentFolder = Folder::Sent,
     ) {
         $this->logger = ($logger ?? PhoreLogger::GetInstance())->scope('mailAutomation');
+        $this->inboxFolder = $this->resolveFolder($inboxFolder);
+        $this->sentFolder = $this->resolveFolder($sentFolder);
         $this->automationFlags = array_replace(self::DEFAULT_AUTOMATION_FLAGS, $client->automationFlags());
         if (is_string($storage)) {
             if ($storage === '') { throw new \InvalidArgumentException('SQLite storage path must not be empty.'); }
@@ -78,6 +91,54 @@ final class MailAutomation
         $this->resolver = $contactResolver ?? new ReplyContactResolver();
         $this->resolver->bind($client, $this->storage);
         $this->logger->debug('Initialized mail automation for account {}', [$client->accountId()]);
+    }
+
+    /**
+     * Build the standard automation runtime from one application config.
+     *
+     * This method owns mailbox connection, analyzer setup, SQLite directory,
+     * action discovery and the process lock. Mailbox folders and automation
+     * flags are taken from phore/mail-client's MailboxConfig.
+     *
+     * @param MailAutomationConfig $config Application bootstrap configuration.
+     * @return self Ready-to-run automation.
+     *
+     * @example $automation = MailAutomation::fromConfig($config);
+     * @see MailAutomationConfig
+     */
+    public static function fromConfig(MailAutomationConfig $config): self
+    {
+        $mailbox = is_string($config->mailbox)
+            ? MailboxConfig::fromFile($config->mailbox)
+            : $config->mailbox;
+
+        $storageDirectory = dirname($config->storage);
+        if (!is_dir($storageDirectory)
+            && !mkdir($storageDirectory, 0775, true)
+            && !is_dir($storageDirectory)) {
+            throw new \RuntimeException(
+                'Could not create mail automation storage directory: '
+                . $storageDirectory,
+            );
+        }
+
+        $automation = new self(
+            client: $mailbox->connect(),
+            storage: $config->storage,
+            logger: $config->logger,
+            mailAnalyzer: new Analysis\MailAnalyzer(
+                aiOptions: $config->aiOptions,
+            ),
+        );
+        $automation->lockFile = $config->lockFile ?? $config->storage . '.lock';
+        $automation->scanAutomations(
+            $config->actionsDirectory,
+            $config->actionPattern,
+            aiOptions: $config->aiOptions,
+            flagUnhandled: $config->flagUnhandled,
+        );
+
+        return $automation;
     }
 
     public function storage(): AutomationStorage { return $this->storage; }
@@ -107,6 +168,188 @@ final class MailAutomation
             $this->order++,
         );
         $this->logger->debug('Registered automation {} for folder {}', [$id, $folder instanceof Folder ? $folder->value : $folder]);
+    }
+
+    /**
+     * Register semantic handlers directly, including their declared source folders.
+     * All objects in this call share one AI choice set. Standard folders are
+     * resolved once and deduplicated; no application-owned forwarding adapter is needed.
+     *
+     * @param object|list<object> $rules Objects with public #[OnMailAction] methods.
+     * @param array<string,mixed> $aiOptions Options passed to phore/ai-harness.
+     * @param bool $flagUnhandled Mark uncertain/unmatched mail for manual review.
+     * @param int $maxContextBytes Summary context byte ceiling; never silently truncated.
+     * @param int $priority Priority relative to legacy folder rules.
+     * @param string $automationId Unique registration group ID.
+     * @throws \LogicException When no MailAnalyzer is configured.
+     * @throws \InvalidArgumentException For invalid or duplicate registrations.
+     * @example $automation->addMailActions([new LeadActions(), new ProfileActions()]);
+     * @see Attributes\OnMailAction
+     */
+    public function addMailActions(
+        object|array $rules,
+        array $aiOptions = [],
+        bool $flagUnhandled = false,
+        int $maxContextBytes = 100_000,
+        int $priority = 0,
+        string $automationId = 'ai-mail-actions',
+    ): self {
+        if ($this->mailAnalyzer === null) {
+            throw new \LogicException('Configure MailAutomation with mailAnalyzer before registering mail actions.');
+        }
+        if (trim($automationId) === '') {
+            throw new \InvalidArgumentException('Mail action automationId must not be empty.');
+        }
+        $matcher = new Analysis\MailActionMatcher($rules, $aiOptions, $flagUnhandled, $maxContextBytes);
+        $folders = [];
+        foreach ($matcher->folders() as $folder) {
+            $resolved = $this->resolveFolder($folder);
+            $folders[$resolved] = $automationId . ':' . hash('sha256', $resolved);
+        }
+        // Validate the complete group before adding any folder to the engine.
+        foreach ($folders as $id) {
+            if (isset($this->ruleIds[$id])) {
+                throw new \InvalidArgumentException('Duplicate automationId: ' . $id);
+            }
+        }
+        foreach ($folders as $folder => $id) {
+            $this->register((string)$folder, static fn(Email $mail, MailContext $context): bool => true, $matcher, $priority, $id);
+        }
+        return $this;
+    }
+
+    /**
+     * Register one AI-routed mail action.
+     */
+    public function addMailAutomation(
+        object $action,
+        array $aiOptions = [],
+        bool $flagUnhandled = false,
+        int $maxContextBytes = 100_000,
+    ): self {
+        return $this->addMailActions(
+            [$action],
+            $aiOptions,
+            $flagUnhandled,
+            $maxContextBytes,
+            automationId: 'ai-mail-action:' . hash('sha256', $action::class),
+        );
+    }
+
+    /**
+     * Recursively load attributed action classes from a directory.
+     *
+     * Files are selected by filename pattern. Every concrete class declared in
+     * those files with an OnMailAction attribute is instantiated without
+     * constructor arguments and registered as one shared AI choice set.
+     */
+    public function scanAutomations(
+        string $directory,
+        string $pattern = '*Action.php',
+        array $aiOptions = [],
+        bool $flagUnhandled = false,
+        int $maxContextBytes = 100_000,
+    ): self {
+        if (!is_dir($directory)) {
+            throw new \InvalidArgumentException('Automation directory does not exist: ' . $directory);
+        }
+
+        $files = [];
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator(
+                $directory,
+                \FilesystemIterator::SKIP_DOTS,
+            ),
+        );
+        foreach ($iterator as $file) {
+            if (!$file->isFile() || !fnmatch($pattern, $file->getFilename())) {
+                continue;
+            }
+            $path = $file->getRealPath();
+            if ($path === false) {
+                continue;
+            }
+            $files[$path] = true;
+            require_once $path;
+        }
+
+        $actions = [];
+        foreach (get_declared_classes() as $class) {
+            $reflection = new \ReflectionClass($class);
+            $file = $reflection->getFileName();
+            $real = $file === false ? false : realpath($file);
+            if ($real === false || !isset($files[$real]) || $reflection->isAbstract()) {
+                continue;
+            }
+
+            $hasAction = $reflection->getAttributes(OnMailAction::class) !== [];
+            if (!$hasAction) {
+                foreach ($reflection->getMethods(\ReflectionMethod::IS_PUBLIC) as $method) {
+                    if ($method->getAttributes(OnMailAction::class) !== []) {
+                        $hasAction = true;
+                        break;
+                    }
+                }
+            }
+            if (!$hasAction) {
+                continue;
+            }
+
+            $constructor = $reflection->getConstructor();
+            if ($constructor !== null && $constructor->getNumberOfRequiredParameters() > 0) {
+                throw new \InvalidArgumentException(
+                    'Scanned mail action requires constructor arguments: ' . $class,
+                );
+            }
+            $actions[] = $reflection->newInstance();
+        }
+
+        if ($actions === []) {
+            throw new \InvalidArgumentException(
+                'No OnMailAction classes found in ' . $directory . ' matching ' . $pattern,
+            );
+        }
+
+        return $this->addMailActions(
+            $actions,
+            $aiOptions,
+            $flagUnhandled,
+            $maxContextBytes,
+            automationId: 'ai-mail-scan:' . hash('sha256', realpath($directory) . "\0" . $pattern),
+        );
+    }
+
+    /**
+     * Manually synchronize Sent before Inbox, matching the standard run order.
+     */
+    public function scanSent(
+        bool $processExistingOutgoing = false,
+        bool $dryRun = false,
+    ): RunReport {
+        $report = new RunReport();
+        $this->drainFolder(
+            $this->sentFolder,
+            true,
+            $processExistingOutgoing,
+            $dryRun,
+            $report,
+        );
+
+        return $report;
+    }
+
+    public function scanInbox(bool $dryRun = false): RunReport
+    {
+        $report = new RunReport();
+        $this->drainFolder(
+            $this->inboxFolder,
+            false,
+            false,
+            $dryRun,
+            $report,
+        );
+
+        return $report;
     }
 
     public function addRules(object|callable|string $rules): self
@@ -176,22 +419,166 @@ final class MailAutomation
         return 'closure-' . ($this->order + 1);
     }
 
-    public function run(bool $processExistingOutgoing = false, bool $dryRun = false): RunReport
+    /**
+     * Process the configured folders using the standard Sent -> Inbox cycle.
+     *
+     * Configuration-created instances acquire their process lock internally.
+     * Dry-run never persists cursors/status flags or executes business actions.
+     *
+     * @param bool $processExistingOutgoing Process initial Sent baseline actions.
+     * @param bool $dryRun Disable persistent side effects.
+     * @return RunReport Aggregated processing result.
+     *
+     * @example $report = $automation->run(dryRun: true);
+     * @see runMail()
+     */
+    public function run(
+        bool $processExistingOutgoing = false,
+        bool $dryRun = false,
+    ): RunReport {
+        $this->acquireRunLock();
+
+        try {
+            $report = new RunReport();
+            $this->deferred = [];
+            $this->logger->debug(
+                'Start run with {} registered automations',
+                [count($this->rules)],
+            );
+
+            $folders = [$this->sentFolder, $this->inboxFolder];
+            foreach ($this->rules as $rule) {
+                $folder = $this->resolveFolder($rule->folder);
+                if (!in_array($folder, $folders, true)) {
+                    $folders[] = $folder;
+                }
+            }
+
+            foreach ($folders as $folder) {
+                $this->drainFolder(
+                    $folder,
+                    $folder === $this->sentFolder,
+                    $processExistingOutgoing,
+                    $dryRun,
+                    $report,
+                );
+            }
+
+            $this->logger->debug(
+                'Run finished: {} processed, {} skipped, {} indexed sent',
+                [$report->processed, $report->skipped, $report->indexedSent],
+            );
+
+            return $report;
+        } finally {
+            $this->releaseRunLock();
+        }
+    }
+
+    /**
+     * Reprocess exactly one mail-client message reference.
+     *
+     * Cursor state is not advanced. Existing processed/error/actionRequired
+     * flags do not block the explicit retry; normal success/error flag handling
+     * still applies unless dry-run is active.
+     *
+     * @param string $mailId Encoded phore/mail-client message reference.
+     * @param bool $dryRun Disable persistent side effects.
+     * @return RunReport Result for the single message.
+     *
+     * @example $report = $automation->runMail($id, dryRun: true);
+     * @see MailClient::peek()
+     */
+    public function runMail(string $mailId, bool $dryRun = false): RunReport
     {
-        $report = new RunReport();
-        $this->deferred = [];
-        $this->logger->debug('Start run with {} registered automations', [count($this->rules)]);
-        $sent = Folder::Sent->resolve($this->client);
-        $folders = [$sent];
-        foreach ($this->rules as $rule) {
-            $folder = $this->resolveFolder($rule->folder);
-            if (!in_array($folder, $folders, true)) { $folders[] = $folder; }
+        if (trim($mailId) === '') {
+            throw new \InvalidArgumentException('Mail ID must not be empty.');
         }
-        foreach ($folders as $folder) {
-            $this->drainFolder($folder, $folder === $sent, $processExistingOutgoing, $dryRun, $report);
+
+        $this->acquireRunLock();
+
+        try {
+            $report = new RunReport();
+            $mail = $this->client->peek($mailId);
+            $ownAddress = $this->client->fromAddress()?->getAddress();
+            $outgoing = count($mail->from()) === 1
+                && $mail->from()[0]->getAddress() === $ownAddress;
+            $folder = $outgoing ? $this->sentFolder : $this->inboxFolder;
+            $direction = $outgoing ? 'outgoing' : 'incoming';
+
+            if ($outgoing) {
+                $this->indexSent($mail, $folder, $report);
+            }
+
+            $content = $this->mailAnalyzer?->analyze(
+                $mail,
+                $this->client,
+                $this->storage,
+                $direction,
+                persist: !$dryRun,
+            );
+
+            try {
+                $this->processMessage(
+                    $mail,
+                    $folder,
+                    $direction,
+                    $dryRun,
+                    $report,
+                    $content,
+                    ignoreBlockingFlags: true,
+                );
+            } catch (\Throwable $error) {
+                if (!$dryRun) {
+                    $this->client->addFlag(
+                        $mail,
+                        $this->automationFlags['error'],
+                    );
+                }
+                $report->addError($folder, $mail->messageId(), $error);
+            }
+
+            return $report;
+        } finally {
+            $this->releaseRunLock();
         }
-        $this->logger->debug('Run finished: {} processed, {} skipped, {} indexed sent', [$report->processed, $report->skipped, $report->indexedSent]);
-        return $report;
+    }
+
+    private function acquireRunLock(): void
+    {
+        if ($this->lockFile === null) {
+            return;
+        }
+        if ($this->runLock !== null) {
+            throw new \LogicException('Mail automation run lock is already held.');
+        }
+
+        $handle = @fopen($this->lockFile, 'c');
+        if ($handle === false) {
+            throw new \RuntimeException(
+                'Could not open mail automation lock file: ' . $this->lockFile,
+            );
+        }
+        if (!flock($handle, LOCK_EX | LOCK_NB)) {
+            fclose($handle);
+            throw new \RuntimeException(
+                'Another mail automation process is already running: '
+                . $this->lockFile,
+            );
+        }
+
+        $this->runLock = $handle;
+    }
+
+    private function releaseRunLock(): void
+    {
+        if ($this->runLock === null) {
+            return;
+        }
+
+        flock($this->runLock, LOCK_UN);
+        fclose($this->runLock);
+        $this->runLock = null;
     }
 
     private function drainFolder(string $folder, bool $isSent, bool $processExistingOutgoing, bool $dryRun, RunReport $report): void
@@ -225,28 +612,36 @@ final class MailAutomation
                     $log->debug('Stop folder sync for deferred message {}', [$mail->messageId()]);
                     return;
                 }
-                if ($isSent) { $this->indexSent($mail, $folder, $report); }
-                if ($baselineSent) {
-                    if ($this->blockingFlag($mail) !== null) {
+                $direction = $isSent ? 'outgoing' : 'incoming';
+                try {
+                    if ($isSent) { $this->indexSent($mail, $folder, $report); }
+                    // Fehler/manuelle Sperren verhindern auch wiederholte AI-Aufrufe.
+                    if (in_array($this->automationFlags['error'], $mail->flags(), true)
+                        || in_array($this->automationFlags['actionRequired'], $mail->flags(), true)) {
                         $report->skipped++;
                         continue;
                     }
-                    if (!$dryRun) {
-                        try {
-                            $this->client->addFlag($mail, $this->automationFlags['processed']);
-                            $log->debug('Baseline sent message marked processed without automation');
-                        } catch (\Throwable $error) {
-                            $log->error('Marking baseline sent message failed: {}', [$error->getMessage(), 'exception' => $error]);
-                            $report->addError($folder,$mail->messageId(),$error);
-                            return;
+                    // Auch Sent-Baseline und schon bearbeitete Mails liefern Verlaufskontext.
+                    $mailContent = $this->mailAnalyzer?->analyze($mail, $this->client, $this->storage, $direction, persist: !$dryRun);
+                    if ($baselineSent) {
+                        if ($this->blockingFlag($mail) !== null) {
+                            $report->skipped++;
+                            continue;
                         }
+                        if (!$dryRun) {
+                            try {
+                                $this->client->addFlag($mail, $this->automationFlags['processed']);
+                                $log->debug('Baseline sent message marked processed without automation');
+                            } catch (\Throwable $error) {
+                                $log->error('Marking baseline sent message failed: {}', [$error->getMessage(), 'exception' => $error]);
+                                $report->addError($folder,$mail->messageId(),$error);
+                                return;
+                            }
+                        }
+                        $report->skipped++;
+                        continue;
                     }
-                    $report->skipped++;
-                    continue;
-                }
-                $direction = $isSent ? 'outgoing' : 'incoming';
-                try {
-                    $this->processMessage($mail, $folder, $direction, $dryRun, $report);
+                    $this->processMessage($mail, $folder, $direction, $dryRun, $report, $mailContent);
                 } catch (\Throwable $error) {
                     $senders = array_map(static fn($address): string => $address->getAddress(), $mail->from());
                     $messageError = new \RuntimeException(sprintf(
@@ -295,12 +690,12 @@ final class MailAutomation
         }
     }
 
-    private function processMessage(Email $mail, string $folder, string $direction, bool $dryRun, RunReport $report): void
+    private function processMessage(Email $mail, string $folder, string $direction, bool $dryRun, RunReport $report, ?Content\AiMail $mailContent = null, bool $ignoreBlockingFlags = false): void
     {
         $messageId = $mail->messageId() ?? $mail->id() ?? 'unknown';
         $messageLog = $this->logger->scope('message')->withContext(['messageId' => $messageId, 'folder' => $folder, 'direction' => $direction]);
         $blockingFlag = $this->blockingFlag($mail);
-        if ($blockingFlag !== null) {
+        if (!$ignoreBlockingFlags && $blockingFlag !== null) {
             $report->skipped++;
             $messageLog->debug('Skip message because blocking automation flag {} is set', [$blockingFlag]);
             return;
@@ -320,7 +715,7 @@ final class MailAutomation
         }
         $messageLog->debug('Contact resolution status {}', [$resolution->status->value]);
 
-        $context = new MailContext($mail,$folder,$direction,$resolution->contact,$resolution,$messageLog,$dryRun,$this->storage,$this->client);
+        $context = new MailContext($mail,$folder,$direction,$resolution->contact,$resolution,$messageLog,$dryRun,$this->storage,$this->client,$mailContent);
         $rules = $this->rulesFor($folder);
         $final = $mail;
         $handled = false;
@@ -352,7 +747,7 @@ final class MailAutomation
             $context->logger->debug('Automation {} matched', [$rule->id]);
             if ($actions->isActionRequired()) {
                 $actionRequired = true;
-            } elseif (!$actions->isComplete()) {
+            } elseif (!$dryRun && !$actions->isComplete()) {
                 [$final,$reprocess] = $this->executeActions($final,$actions,$context->logger->scope('actions'));
             }
             break;
@@ -395,12 +790,43 @@ final class MailAutomation
                 case 'removeFlag':
                     $current = $this->client->removeFlag($current,$item['args'][0]);
                     break;
+                case 'sendAiMailDraft':
+                case 'saveAiMailDraft':
+                    /** @var AiMailDraft $draft */
+                    $draft = $item['args'][0];
+                    $outgoing = $this->buildAiMailDraft($current, $draft);
+                    $this->rememberAiMailDraft($draft, $outgoing);
+                    if ($item['type'] === 'saveAiMailDraft' || $this->sender === null) {
+                        $this->client->saveDraft($outgoing);
+                    } else {
+                        $this->sender->send($outgoing);
+                        if ($this->client->isAutomatic('answered')) {
+                            $current = $this->client->markAnswered($current);
+                        }
+                    }
+                    break;
+                case 'sendMail':
+                    if ($this->sender === null) {
+                        $this->client->saveDraft($item['args'][0]);
+                    } else {
+                        $this->sender->send($item['args'][0]);
+                        if ($this->client->isAutomatic('answered')) {
+                            $current = $this->client->markAnswered($current);
+                        }
+                    }
+                    break;
                 case 'sendReply':
                     $reply = $this->client->reply($current,$item['args'][0]);
+                    foreach ($item['args'][1] ?? [] as $attachment) {
+                        $reply = $reply->attach($attachment);
+                    }
                     if ($this->sender === null) {
                         $this->client->saveDraft($reply);
                     } else {
                         $this->sender->send($reply);
+                        if ($this->client->isAutomatic('answered')) {
+                            $current = $this->client->markAnswered($current);
+                        }
                     }
                     break;
                 case 'moveTo':
@@ -421,6 +847,71 @@ final class MailAutomation
             }
         }
         return [$current,$reprocess];
+    }
+
+    private function buildAiMailDraft(
+        Email $current,
+        AiMailDraft $draft,
+    ): Email {
+        if ($draft->mode === AiMailDraft::MODE_REPLY) {
+            $outgoing = $this->client->reply($current, $draft->getContent());
+        } else {
+            $recipient = $draft->recipient();
+            $subject = $draft->draftSubject;
+            if ($recipient === null || $recipient === [] || $subject === null || trim($subject) === '') {
+                throw new \InvalidArgumentException(
+                    'New and forwarded AI mail drafts require recipient and subject.',
+                );
+            }
+            $outgoing = (new Email(to: $recipient, subject: $subject))
+                ->withMarkdown($draft->getContent());
+        }
+
+        foreach ($draft->draftAttachments() as $attachment) {
+            if ($attachment->fileName === null) {
+                throw new \InvalidArgumentException(
+                    'AI mail draft attachment requires a filename.',
+                );
+            }
+            $outgoing = $outgoing->attach(
+                \Phore\MailClient\Attachment::fromBytes(
+                    $attachment->fileName,
+                    $attachment->contentType,
+                    $attachment->rawData,
+                ),
+            );
+        }
+
+        return $outgoing;
+    }
+
+    /**
+     * Persist content identity until the authoritative Sent copy is observed.
+     */
+    private function rememberAiMailDraft(
+        AiMailDraft $draft,
+        Email $outgoing,
+    ): void {
+        $recipients = array_map(
+            static fn ($address): string => strtolower($address->getAddress()),
+            [...$outgoing->to(), ...$outgoing->cc(), ...$outgoing->bcc()],
+        );
+        sort($recipients);
+
+        $this->storage->metadataSet(
+            'ai-outbound-draft',
+            $this->client->accountId(),
+            $draft->getId(),
+            [
+                'id' => $draft->getId(),
+                'aliases' => $draft->getAliases(),
+                'instructions' => $draft->getInstructions(),
+                'recipients' => $recipients,
+                'subject' => trim($outgoing->subject()),
+                'bodyHash' => hash('sha256', $outgoing->body()->text()),
+                'claimedMessageId' => null,
+            ],
+        );
     }
 
     /** @return list<Rule> */

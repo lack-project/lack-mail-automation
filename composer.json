@@ -4,13 +4,17 @@
   "description": "Stateful mailbox automation, contact resolution and rule processing on top of phore/mail-client.",
   "license": "MIT",
   "repositories": [
-    {"type": "vcs", "url": "https://github.com/phore/phore-mailclient"}
+    {"type": "vcs", "url": "https://github.com/phore/phore-mailclient"},
+    {"type": "vcs", "url": "https://github.com/phore/phore-ai-harness"}
   ],
   "require": {
     "php": ">=8.5",
     "ext-json": "*",
     "ext-pdo": "*",
     "ext-pdo_sqlite": "*",
+    "phore/ai-harness": "dev-main",
+    "phore/cli2": "dev-main",
+    "phore/filesystem": "*",
     "phore/log": "dev-master",
     "phore/mail-client": "dev-main"
   },
@@ -25,6 +29,9 @@
       "Lack\\MailAutomation\\Test\\": "test/"
     }
   },
+  "bin": [
+    "bin/lack-mail-automation"
+  ],
   "scripts": {
     "test": "phpunit test"
   },

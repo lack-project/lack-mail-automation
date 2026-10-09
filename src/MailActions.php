@@ -107,8 +107,67 @@ final class ScheduledMailActions implements MailAction
     public function moveToRaw(string $folder, bool $reprocess = false): self
     { return $this->queue('moveToRaw', [$folder,$reprocess]); }
 
-    public function sendReply(string $markdown): self
-    { return $this->queue('sendReply', [$markdown]); }
+    /**
+     * Schedule a new message, e.g. an initial contact to the person named in a lead.
+     * Unlike sendReply(), this does not derive recipients from the source mail.
+     * The application must validate/authorize recipients before constructing it.
+     * The engine uses the same DraftSender/draft and dry-run semantics as replies.
+     * @throws \InvalidArgumentException When no recipient is set.
+     * @example return MailActions::schedule()->sendMail($initialContact)->moveTo('processed_leads');
+     * @see self::sendReply()
+     */
+    public function sendMail(\Phore\MailClient\Email $mail): self
+    {
+        if ([...$mail->to(), ...$mail->cc(), ...$mail->bcc()] === []) {
+            throw new \InvalidArgumentException('A scheduled message requires at least one recipient.');
+        }
+        return $this->queue('sendMail', [$mail]);
+    }
+
+    /**
+     * Schedule a reply, optionally containing original or generated attachments.
+     * No I/O occurs here. MailAutomation saves a draft by default, or passes it
+     * to an explicitly configured DraftSender; dry-run executes neither.
+     *
+     * @param list<\Phore\MailClient\Attachment> $attachments Immutable reply attachments.
+     * @throws \InvalidArgumentException For values that are not Attachment objects.
+     * @example return MailActions::schedule()->sendReply('Revised CV attached.', [$cv]);
+     * @see \Lack\MailAutomation\Analysis\AnalyzedMail::reply()
+     */
+    /**
+     * Schedule a typed AI mail draft for delivery.
+     *
+     * @example return $mail->ai_reply($prompt)->send();
+     * @see \Lack\MailAutomation\Content\AiMailDraft::send()
+     */
+    public function sendAiMailDraft(
+        \Lack\MailAutomation\Content\AiMailDraft $draft,
+    ): self {
+        return $this->queue('sendAiMailDraft', [$draft]);
+    }
+
+    /**
+     * Save a typed AI mail draft without sending it.
+     *
+     * @example return $mail->ai_reply($prompt)->draft();
+     * @see \Lack\MailAutomation\Content\AiMailDraft::draft()
+     */
+    public function saveAiMailDraft(
+        \Lack\MailAutomation\Content\AiMailDraft $draft,
+    ): self {
+        return $this->queue('saveAiMailDraft', [$draft]);
+    }
+
+    public function sendReply(string $markdown, array $attachments = []): self
+    {
+        foreach ($attachments as $attachment) {
+            if (!$attachment instanceof \Phore\MailClient\Attachment) {
+                throw new \InvalidArgumentException('Reply attachments must be Attachment objects.');
+            }
+        }
+        // Preserve the existing schedule representation for replies without files.
+        return $this->queue('sendReply', $attachments === [] ? [$markdown] : [$markdown, array_values($attachments)]);
+    }
 }
 
 final class RunError
