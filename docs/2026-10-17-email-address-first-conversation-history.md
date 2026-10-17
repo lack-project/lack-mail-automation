@@ -200,7 +200,7 @@ den *technischen Thread* bilden. Eine über mehrere Adressen aggregierte
 *Kontakt-Timeline* ist eine andere, bewusst angeforderte Sicht. Ein
 späterer AI-Context-Builder kann diese Timeline als Quellenmenge
 verwenden, muss aber pro Nachricht die tatsächlichen Teilnehmer und
-Zugriffsrechte prüfen und dürfen `Bcc`/fremde Empfänger nicht
+Zugriffsrechte prüfen und darf `Bcc`/fremde Empfänger nicht
 ungeprüft in Prompts mischen. Die bestehende `ConversationScope`-ID
 aus einem Thread-Root darf nicht ohne explizite Migration zu einer
 Kontakt-ID umgedeutet werden.
@@ -228,7 +228,8 @@ Gelöschte Nachrichten, alte Tags und alte Kontaktmetadaten erfordern
 bei gewünschter Übernahme einen **eigenen**, ausdrücklich freizugebenden
 Import. Diese historische Datenübernahme ist nicht mit dem späteren
 fachlichen Adress-`assign`/`undo`-Vorgang aus § 5 gleichzusetzen.
-Ohne Import beginnt die neue Timeline leer und wächst beim Rescan.
+Ohne Import beginnt die neue Timeline leer; zum Rescan müssen die
+bestehenden Cursor bewusst neu initialisiert werden.
 
 ## § 8 Implementierungsschnitt für den Folge-PR
 
